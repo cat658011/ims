@@ -119,10 +119,17 @@ class SipHandler(val ctxt: Context) {
     lateinit private var serverSocket: SipConnectionTcpServer
     lateinit private var serverSocketUdp: SipConnectionUdpServer
     private var reliableSequenceCounter = 67
+    private val incomingFinalResponseSent = AtomicBoolean(false)
+    private val incomingAcceptedAwaitingAck = AtomicBoolean(false)
+    private val incomingHangupAfterAck = AtomicBoolean(false)
 
     private val cbLock = ReentrantLock()
     private var requestCallbacks: Map<SipMethod, ((SipRequest) -> Int)> = mapOf()
     private var responseCallbacks: Map<String, ((SipResponse) -> Boolean)> = mapOf()
+    // SIP responses must be written back on the same transport flow that delivered the request.
+    // This is especially important for incoming INVITE over the TCP server socket: writing the
+    // 180/200 to the registration/control socket can make the P-CSCF ignore the final response.
+    private val requestWriters = java.util.concurrent.ConcurrentHashMap<String, OutputStream>()
     private var imsReady = false
     var imsReadyCallback: (() -> Unit)? = null
     var imsFailureCallback: (() -> Unit)? = null
@@ -131,6 +138,8 @@ class SipHandler(val ctxt: Context) {
     var onIncomingCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
         null
     var onOutgoingCallConnected: ((handle: Object, extras: Map<String, String>) -> Unit)? =
+        null
+    var onIncomingCallConnected: ((handle: Object, extras: Map<String, String>) -> Unit)? =
         null
     var onCancelledCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
         null
@@ -165,6 +174,10 @@ class SipHandler(val ctxt: Context) {
             // invalid message, stop trying
             Rlog.d(TAG, "Got invalid message! Closing socket (except main)")
             return false
+        }
+
+        msg.headers["call-id"]?.getOrNull(0)?.let { callId ->
+            requestWriters[callId] = writer
         }
 
         val requestCb = cbLock.withLock { requestCallbacks[msg.method] }
@@ -393,6 +406,7 @@ class SipHandler(val ctxt: Context) {
         setRequestCallback(SipMethod.MESSAGE, ::handleSms)
         setRequestCallback(SipMethod.INVITE, ::handleCall)
         setRequestCallback(SipMethod.PRACK, ::handlePrack)
+        setRequestCallback(SipMethod.ACK, ::handleAck)
         setRequestCallback(SipMethod.CANCEL, ::handleCancel)
         setRequestCallback(SipMethod.BYE, ::handleCancel)
         setRequestCallback(SipMethod.UPDATE, ::handleUpdate)
@@ -707,6 +721,68 @@ class SipHandler(val ctxt: Context) {
         }
     }
 
+    private fun responseHeadersFromRequest(
+        request: SipRequest,
+        toOverride: List<String>? = null,
+        extra: SipHeadersMap = emptyMap(),
+    ): SipHeadersMap {
+        val base = request.headers.filter { (k, _) ->
+            k in listOf("via", "from", "to", "call-id", "cseq", "record-route")
+        }
+        val tagged = if (toOverride != null) base + ("to" to toOverride) else base
+        return tagged + extra
+    }
+
+    private fun localDialogHeadersForRequest(call: Call, method: SipMethod): SipHeadersMap {
+        val cseq = call.localCseq.getAndIncrement()
+        val base = commonHeaders - "route" - "security-verify" - "require" -
+            "proxy-require" - "content-type" - "content-length" - "record-route" -
+            "rseq" - "p-access-network-info"
+        val directionHeaders = if (call.outgoing) {
+            mapOf(
+                "from" to call.callHeaders["from"]!!,
+                "to" to call.callHeaders["to"]!!,
+            )
+        } else {
+            mapOf(
+                // For an incoming dialog, local side is the original To, remote side is the original From.
+                "from" to call.callHeaders["to"]!!,
+                "to" to call.callHeaders["from"]!!,
+            )
+        }
+        val routeSet = call.callHeaders["record-route"]?.let { rr ->
+            // Single Record-Route on O2/S9; keep order for UAS side. Multiple values may need
+            // stricter RFC 3261 UAS/UAC ordering later, but this is already much better than
+            // copying the INVITE Via/From/To/CSeq into BYE.
+            mapOf("route" to rr)
+        } ?: emptyMap()
+        return base + directionHeaders + routeSet + mapOf("call-id" to call.callHeaders["call-id"]!!) +
+            """
+            Contact: $contact
+            CSeq: $cseq $method
+            Content-Length: 0
+            """.toSipHeadersMap()
+    }
+
+    fun handleAck(request: SipRequest): Int {
+        val callId = request.headers["call-id"]?.getOrNull(0).orEmpty()
+        val call = currentCall
+        val currentCallId = call?.callHeaders?.get("call-id")?.getOrNull(0)
+        Rlog.d(TAG, "Received ACK for call-id=$callId current=$currentCallId outgoing=${call?.outgoing}")
+        if (call != null && !call.outgoing && currentCallId == callId) {
+            callStarted.set(true)
+            incomingAcceptedAwaitingAck.set(false)
+            onIncomingCallConnected?.invoke(Object(), mapOf("call-id" to callId))
+
+            if (incomingHangupAfterAck.getAndSet(false)) {
+                Rlog.d(TAG, "ACK received after local pre-ACK hangup; sending deferred BYE")
+                sendByeForCall(call)
+                currentCall = null
+            }
+        }
+        return 0
+    }
+
     fun handlePrack(request: SipRequest): Int {
         Rlog.d(TAG, "Received PRACK for ${request.headers["rack"]!![0]}")
         synchronized(prAckWaitLock) {
@@ -760,6 +836,7 @@ a=sendrecv
             sdp = request.body,
             hasEarlyMedia = call.hasEarlyMedia,
             remoteContact = call.remoteContact,
+            incomingResponseWriter = call.incomingResponseWriter,
             )
 
         val reply =
@@ -778,7 +855,9 @@ a=sendrecv
                 body = mySdp
             )
         Rlog.d(TAG, "Replying back with $reply")
-        synchronized(socket.gWriter()) { socket.gWriter().write(reply.toByteArray()) }
+        val updateCallId = request.headers["call-id"]?.getOrNull(0)
+        val updateResponseWriter = updateCallId?.let { requestWriters[it] } ?: socket.gWriter()
+        synchronized(updateResponseWriter) { updateResponseWriter.write(reply.toByteArray()) }
 
         if(call?.outgoing == false) {
             val myHeaders2 = call.callHeaders - "rseq" - "content-type" - "require"
@@ -789,23 +868,77 @@ a=sendrecv
                     headersParam = myHeaders2
                 )
             Rlog.d(TAG, "Sending $msg2")
-            synchronized(socket.gWriter()) { socket.gWriter().write(msg2.toByteArray()) }
+            synchronized(updateResponseWriter) { updateResponseWriter.write(msg2.toByteArray()) }
         }
 
         return 0
     }
 
     fun handleCancel(request: SipRequest): Int {
-        // RFC 3261 §9.2: CANCEL has no effect if we already sent a final response (200 OK)
-        if (callStarted.get()) {
-            Rlog.d(TAG, "CANCEL received after 200 OK — ignoring per RFC 3261 §9.2")
-            return 200
-        }
-        callStopped.set(true)
-        Rlog.d(TAG, "Cancelled call ${request.headers["call-id"]!![0]}")
+        val callId = request.headers["call-id"]?.get(0).orEmpty()
+        val isCancel = request.method == SipMethod.CANCEL
+        val isBye = request.method == SipMethod.BYE
 
-        // We're supposed to add an additional answer SIP/2.0 487 Request Terminated
-        onCancelledCall?.invoke(Object(), "", emptyMap())
+        // RFC 3261 §9.2: CANCEL has no effect if we already sent a final response (200 OK).
+        // BYE, however, is still a real established-dialog termination.
+        if (isCancel && incomingFinalResponseSent.get()) {
+            Rlog.d(TAG, "CANCEL received after final 200 OK was sent — replying 200 to CANCEL and clearing pending incoming dialog")
+            val toOverride = currentCall?.callHeaders?.get("to") ?: request.headers["to"]
+            val responseHeaders = responseHeadersFromRequest(
+                request,
+                toOverride = toOverride,
+                extra = "Content-Length: 0".toSipHeadersMap(),
+            )
+            val response = SipResponse(
+                statusCode = 200,
+                statusString = "OK",
+                headersParam = responseHeaders,
+                autofill = false
+            )
+            Rlog.d(TAG, "Sending explicit 200 OK to late CANCEL: $response")
+            val cancelResponseWriter = requestWriters[callId] ?: currentCall?.incomingResponseWriter ?: socket.gWriter()
+            synchronized(cancelResponseWriter) { cancelResponseWriter.write(response.toByteArray()) }
+
+            callStopped.set(true)
+            callStarted.set(false)
+            threadsStarted.set(false)
+            incomingAcceptedAwaitingAck.set(false)
+            incomingHangupAfterAck.set(false)
+            currentCall = null
+            onCancelledCall?.invoke(Object(), "", mapOf("call-id" to callId))
+            return 0
+        }
+
+        callStopped.set(true)
+        callStarted.set(false)
+        threadsStarted.set(false)
+        synchronized(prAckWaitLock) {
+            prAckWait.clear()
+            prAckWaitLock.notifyAll()
+        }
+
+        Rlog.d(TAG, "Cancelled call $callId method=${request.method}")
+
+        if (isCancel) {
+            val responseHeaders = responseHeadersFromRequest(
+                request,
+                extra = "Content-Length: 0".toSipHeadersMap(),
+            )
+            val response = SipResponse(
+                statusCode = 487,
+                statusString = "Request Terminated",
+                headersParam = responseHeaders,
+                autofill = false
+            )
+            Rlog.d(TAG, "Sending $response")
+            val cancelResponseWriter = currentCall?.incomingResponseWriter ?: requestWriters[callId] ?: socket.gWriter()
+            synchronized(cancelResponseWriter) { cancelResponseWriter.write(response.toByteArray()) }
+        } else if (!isBye) {
+            Rlog.w(TAG, "handleCancel called for unexpected method ${request.method}")
+        }
+
+        currentCall = null
+        onCancelledCall?.invoke(Object(), "", mapOf("call-id" to callId))
         return 200
     }
 
@@ -822,6 +955,8 @@ a=sendrecv
         val rtpSocket: DatagramSocket,
         val hasEarlyMedia: Boolean,
         val remoteContact: String,
+        val incomingResponseWriter: OutputStream? = null,
+        val localCseq: AtomicInteger = AtomicInteger(2),
     )
 
 
@@ -1022,28 +1157,30 @@ a=sendrecv
     var currentCall: Call? = null
     fun acceptCall() {
         thread {
-            // Wait for any outstanding PRACK acknowledgements before sending 200 OK (RFC 3262 §5)
-            val pendingSeqs = synchronized(prAckWaitLock) { prAckWait.toSet() }
-            pendingSeqs.forEach { waitPrack(it) }
+            val call = currentCall
+            if (call == null || call.outgoing) {
+                Rlog.w(TAG, "acceptCall without valid incoming currentCall: $call")
+                return@thread
+            }
 
-            val local =
-                if(socket.gLocalAddr() is Inet6Address)
-                    "[${socket.gLocalAddr().hostAddress}]:${serverSocket.localPort}"
-                else
-                    "${socket.gLocalAddr().hostAddress}:${serverSocket.localPort}"
-            val sipInstance = "<urn:gsma:imei:${imei.substring(0, 8)}-${imei.substring(8, 14)}-0>"
-            val transport = if (socket is SipConnectionTcp) "tcp" else "udp"
-            val evolvedContact =
-                """<sip:$imsi@$local;transport=$transport>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;+g.3gpp.mid-call;+g.3gpp.srvcc-alerting;+g.3gpp.ps2cs-srvcc-orig-pre-alerting"""
+            // S9/O2 test mode: never block accept on pending incoming PRACK state.
+            // The network currently does not PRACK our reliable incoming 183, so
+            // waiting here makes the remote side ring until timeout.
+            synchronized(prAckWaitLock) {
+                if (prAckWait.isNotEmpty()) {
+                    Rlog.w(TAG, "Dropping stale PRACK waits before accept: $prAckWait")
+                    prAckWait.clear()
+                    prAckWaitLock.notifyAll()
+                }
+            }
 
             Rlog.d(TAG, "Accepting call")
-            val call = currentCall!!
             val myHeaders = call.callHeaders
-            val myHeaders3 = myHeaders - "rseq" - "security-verify" + """
-                Session-Expires: 900;refresher=uas
-                P-Preferred-Identity: <$mySip>
-                Contact: $evolvedContact
+            val myHeaders3 = myHeaders - "rseq" - "security-verify" - "p-access-network-info" + """
+                Session-Expires: 1800;refresher=uas
+                Contact: ${call.callHeaders["contact"]!!.first()}
                 Content-Type: application/sdp
+                Content-Length: ${call.sdp.size}
                 """.toSipHeadersMap()
 
             // Normally we shouldn't send again the SDP. With "precondition" feature flag, the SDP in 183 Session Progress (then updated in UPDATE) should be used instead
@@ -1053,12 +1190,39 @@ a=sendrecv
                     statusCode = 200,
                     statusString = "OK",
                     headersParam = myHeaders3,
-                    body = call.sdp
+                    body = call.sdp,
+                    autofill = false
                 )
-            Rlog.d(TAG, "Sending $msg3")
-            synchronized(socket.gWriter()) { socket.gWriter().write(msg3.toByteArray()) }
+            val responseWriter = call.incomingResponseWriter ?: socket.gWriter()
+            val acceptedCallId = call.callHeaders["call-id"]?.getOrNull(0).orEmpty()
+            val responseBytes = msg3.toByteArray()
+            Rlog.d(TAG, "Sending $msg3 via incomingResponseWriter=${call.incomingResponseWriter != null}")
+            synchronized(responseWriter) { responseWriter.write(responseBytes) }
 
-            callStarted.set(true)
+            incomingFinalResponseSent.set(true)
+            incomingAcceptedAwaitingAck.set(true)
+            incomingHangupAfterAck.set(false)
+
+            // RFC 3261: 2xx responses to INVITE are end-to-end and must be retransmitted
+            // by the UAS core until the matching ACK arrives. This is also useful here as a
+            // diagnostic: if the first 200 OK is lost/ignored on the IMS TCP flow, repeated
+            // 200 OKs should make the missing-ACK problem visible in the log/network trace.
+            thread(name = "PhhIncoming2xxRetransmit") {
+                var delayMs = 500L
+                var elapsedMs = 0L
+                while (incomingAcceptedAwaitingAck.get() && elapsedMs < 32000L) {
+                    Thread.sleep(delayMs)
+                    elapsedMs += delayMs
+                    val stillSameCall = currentCall?.callHeaders?.get("call-id")?.getOrNull(0) == acceptedCallId
+                    if (!incomingAcceptedAwaitingAck.get() || !stillSameCall) break
+                    Rlog.w(TAG, "Retransmitting incoming 200 OK waiting for ACK callId=$acceptedCallId elapsed=${elapsedMs}ms")
+                    synchronized(responseWriter) { responseWriter.write(responseBytes) }
+                    delayMs = (delayMs * 2).coerceAtMost(4000L)
+                }
+            }
+
+            // Do not mark SIP confirmed here. For incoming calls, the dialog is only confirmed
+            // when the remote side ACKs our 200 OK. handleAck() will set callStarted.
         }
     }
 
@@ -1090,30 +1254,31 @@ a=sendrecv
 
     fun rejectCall() {
         thread {
-            val call = currentCall!!
-            val headers = call.callHeaders
-            val mySeqCounter = reliableSequenceCounter++
-            val myHeaders = headers + "RSeq: $mySeqCounter".toSipHeadersMap()
+            val call = currentCall
+            if (call == null || call.outgoing) {
+                Rlog.w(TAG, "rejectCall without valid incoming currentCall: $call")
+                return@thread
+            }
+            val myHeaders = call.callHeaders - "rseq" - "require" - "content-type" - "p-access-network-info" +
+                "Content-Length: 0".toSipHeadersMap()
             val msg =
                 SipResponse(
                     statusCode = 486,
                     statusString = "Busy Here",
-                    headersParam = myHeaders
+                    headersParam = myHeaders,
+                    autofill = false
                 )
             Rlog.d(TAG, "Sending $msg")
             synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
 
             callStopped.set(true)
+            currentCall = null
             onCancelledCall?.invoke(Object(), "", emptyMap())
         }
     }
 
-    fun terminateCall() {
-        callStopped.set(true)
-        val call = currentCall ?: return
-        // BYE is a dialog request; must use dialog route set (from 200 OK Record-Route)
-        // stored in call.callHeaders, not the registration Service-Route in commonHeaders
-        val byeHeaders = call.callHeaders.filterKeys { it != "content-type" }
+    private fun sendByeForCall(call: Call) {
+        val byeHeaders = localDialogHeadersForRequest(call, SipMethod.BYE)
         val bye = SipRequest(
             SipMethod.BYE,
             call.remoteContact,
@@ -1121,6 +1286,23 @@ a=sendrecv
         )
         Rlog.d(TAG, "Sending BYE $bye")
         synchronized(socket.gWriter()) { socket.gWriter().write(bye.toByteArray()) }
+    }
+
+    fun terminateCall() {
+        val call = currentCall ?: return
+        callStopped.set(true)
+
+        if (!call.outgoing && incomingFinalResponseSent.get() && !callStarted.get()) {
+            Rlog.w(TAG, "Local hangup before incoming ACK; deferring BYE until ACK and keeping 200 OK retransmission active")
+            incomingHangupAfterAck.set(true)
+            onCancelledCall?.invoke(Object(), "", emptyMap())
+            return
+        }
+
+        sendByeForCall(call)
+        currentCall = null
+        incomingAcceptedAwaitingAck.set(false)
+        incomingHangupAfterAck.set(false)
         onCancelledCall?.invoke(Object(), "", emptyMap())
     }
 
@@ -1525,12 +1707,21 @@ a=sendrecv
         callStarted.set(false)
         threadsStarted.set(false)
         callGeneration.incrementAndGet()
+        incomingFinalResponseSent.set(false)
+        incomingAcceptedAwaitingAck.set(false)
+        incomingHangupAfterAck.set(false)
+        currentCall = null
+        synchronized(prAckWaitLock) {
+            prAckWait.clear()
+            prAckWaitLock.notifyAll()
+        }
 
         val f = request.headers["from"]
         val r = Regex(".*(sip|tel):([^@]*).*")
         val m = r.find(f!![0]!!)!!.groups[2]!!.value
-        Rlog.d(TAG, "Incoming call from $m")
-        onIncomingCall?.invoke(Object(), m, mapOf("call-id" to request.headers["call-id"]!![0]))
+        val incomingCallId = request.headers["call-id"]!![0]
+        val incomingResponseWriter = requestWriters[incomingCallId] ?: socket.gWriter()
+        Rlog.d(TAG, "Incoming call from $m callId=$incomingCallId hasIncomingResponseWriter=${requestWriters.containsKey(incomingCallId)}")
 
         // We'll have three states:
         // - 100 Trying (this will be done by returning 100 in this function)
@@ -1574,14 +1765,20 @@ a=sendrecv
             Rlog.d(TAG, "Matching $codec, got $matches")
             val matches2 = if(matches.size > 1) {
                 matches.sortedBy { m ->
-                    val fmtp = attributes.filter { it.startsWith("fmtp:${m.first}") }[0]
+                    val fmtp = attributes.firstOrNull { it.startsWith("fmtp:${m.first}") }.orEmpty()
                     Rlog.d(TAG, "Matching $codec, for match $m got fmtp $fmtp")
-                    if(fmtp.contains(additional))
-                        0
-                    else if (notAdditional.isNotEmpty() && !fmtp.contains(notAdditional))
-                        1
-                    else
-                        2
+                    when {
+                        // For AMR, do not prefer an rtpmap-only payload when valid fmtp payloads exist.
+                        codec.startsWith("AMR") && fmtp.isEmpty() -> 100
+
+                        // This stack currently sends bandwidth-efficient AMR, so avoid octet-align=1.
+                        notAdditional.isNotEmpty() && fmtp.contains(notAdditional) -> 90
+
+                        // Optional positive preference for codecs/callers where we have one.
+                        additional.isNotEmpty() && fmtp.contains(additional) -> 0
+
+                        else -> 10
+                    }
                 }
             } else {
                 matches
@@ -1594,14 +1791,20 @@ a=sendrecv
             return attributes.firstOrNull() { it.startsWith("fmtp:$track") }
         }
 
-        val hasEarlyMedia = request.headers["p-early-media"]?.isNotEmpty() == true
+        val peerSupportsEarlyMedia = request.headers["p-early-media"]?.isNotEmpty() == true
+        // S9/O2 test mode: do not send a reliable incoming 183 yet. The tested network
+        // did not PRACK it, so accepting the call stalled until the remote side cancelled.
+        val sendReliable183 = false
         val callerSupportsPrecondition = (request.headers["supported"].orEmpty() +
                 request.headers["require"].orEmpty()).any { it.contains("precondition") }
+        val remoteMaxptime = attributes.firstOrNull { it.startsWith("maxptime:") } ?: "maxptime:20"
+        Rlog.d(TAG, "Incoming early-media support=$peerSupportsEarlyMedia sendReliable183=$sendReliable183 callerSupportsPrecondition=$callerSupportsPrecondition remoteMaxptime=$remoteMaxptime")
 
         // Look for an AMR/8000 mode
         // TODO: Select which one? SFR has two, one with mode-set=7 one without it. This would require reading the fmtp lines
-        val (amrTrack, amrTrackDesc) = lookTrackMatching("AMR/8000", "octet-align=0", "octet-align=1")!!
+        val (amrTrack, amrTrackDesc) = lookTrackMatching("AMR/8000", additional = "", notAdditional = "octet-align=1")!!
         val amrTrackRequirements = trackRequirements(amrTrack)
+        val amrFmtpAnswer = amrTrackRequirements ?: "fmtp:$amrTrack mode-set=7;octet-align=0;max-red=0"
 
         // Look for a DTMF track, use the 8000Hz-based one to match AMR timestamps
         val (dtmfTrack, dtmfTrackDesc) = lookTrackMatching("telephone-event/8000")!!
@@ -1609,6 +1812,18 @@ a=sendrecv
         val allTracks = listOf(amrTrack, dtmfTrack).sorted()
         // destination is sip:<owner>@realm, extract owner
         val owner = request.destination.substringAfter("sip:").substringBefore("@")
+
+        val trying = SipResponse(
+            statusCode = 100,
+            statusString = "Trying",
+            headersParam = responseHeadersFromRequest(
+                request,
+                extra = "Content-Length: 0".toSipHeadersMap(),
+            ),
+            autofill = false
+        )
+        Rlog.d(TAG, "Sending explicit 100 Trying on incoming request flow: $trying")
+        synchronized(incomingResponseWriter) { incomingResponseWriter.write(trying.toByteArray()) }
 
         thread {
             // Need to sleep a bit so that our 100 Trying is sent first. Kinda weird.
@@ -1623,55 +1838,68 @@ a=sendrecv
                     "[${socket.gLocalAddr().hostAddress}]:${serverSocket.localPort}"
                 else
                     "${socket.gLocalAddr().hostAddress}:${serverSocket.localPort}"
-            val sipInstance = "<urn:gsma:imei:${imei.substring(0,8)}-${imei.substring(8,14)}-0>"
-            val contactTel =
-                """<sip:$myTel@$local;transport=tcp>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;audio"""
+            val dialogContact = "<sip:$owner@$local;transport=tcp>"
             val mySeqCounter = reliableSequenceCounter++
             val ipType = if(socket.gLocalAddr() is Inet6Address) "IP6" else "IP4"
-            val mySdp = ("""
-v=0
-o=$owner 1 2 IN $ipType ${socket.gLocalAddr().hostAddress}
-s=phh voice call
-c=IN $ipType ${socket.gLocalAddr().hostAddress}
-b=AS:38
-b=RS:0
-b=RR:0
-t=0 0
-m=audio ${rtpSocket.localPort} RTP/AVP ${allTracks.joinToString(" ")}
-b=AS:38
-b=RS:0
-b=RR:0
-a=$amrTrackDesc
-a=ptime:20
-a=maxptime:240
-a=$dtmfTrackDesc
-a=fmtp:$amrTrack mode-set=7;octet-align=0;max-red=0
-a=fmtp:$dtmfTrack 0-15
-${if (callerSupportsPrecondition) """
-a=curr:qos local none
-a=curr:qos remote none
-a=des:qos mandatory local sendrecv
-a=des:qos mandatory remote sendrecv
-a=conf:qos remote sendrecv""".trimIndent() else ""}
-a=sendrecv
-                       """.trim()).toByteArray()
-
-            // Generate a single local tag for all responses in this dialog (RFC 3261 §12.1.1)
-            val localToTag = randomBytes(6).toHex()
-            val toWithTag = request.headers["to"]!!.map { h ->
-                if (h.contains(";tag=")) h else "$h;tag=$localToTag"
+            val sdpLines = mutableListOf(
+                "v=0",
+                "o=$owner 1 2 IN $ipType ${socket.gLocalAddr().hostAddress}",
+                "s=phh voice call",
+                "c=IN $ipType ${socket.gLocalAddr().hostAddress}",
+                "b=AS:38",
+                "b=RS:0",
+                "b=RR:0",
+                "t=0 0",
+                "m=audio ${rtpSocket.localPort} RTP/AVP ${allTracks.joinToString(" ")}",
+                "b=AS:38",
+                "b=RS:0",
+                "b=RR:0",
+                "a=$amrTrackDesc",
+                "a=ptime:20",
+                "a=$remoteMaxptime",
+                "a=$dtmfTrackDesc",
+                "a=$amrFmtpAnswer",
+                "a=fmtp:$dtmfTrack 0-15"
+            )
+            if (callerSupportsPrecondition) {
+                sdpLines += listOf(
+                    "a=curr:qos local none",
+                    "a=curr:qos remote none",
+                    "a=des:qos mandatory local sendrecv",
+                    "a=des:qos mandatory remote sendrecv",
+                    "a=conf:qos remote sendrecv"
+                )
             }
+            sdpLines += "a=sendrecv"
+            val mySdp = sdpLines.joinToString("\r\n").toByteArray(Charsets.US_ASCII)
+
+            // Generate a single local tag for all responses in this dialog (RFC 3261 §12.1.1).
+            // Important for tel: URIs: without <> the appended ;tag can be parsed as a TEL URI
+            // parameter instead of a SIP To header parameter, and the network may ignore our 200 OK.
+            val localToTag = randomBytes(6).toHex()
+            fun addToHeaderTag(header: String, tag: String): String {
+                val h = header.trim()
+                if (h.contains(";tag=", ignoreCase = true)) return h
+                if (h.contains(">")) return "$h;tag=$tag"
+                if (h.startsWith("sip:", ignoreCase = true) ||
+                    h.startsWith("sips:", ignoreCase = true) ||
+                    h.startsWith("tel:", ignoreCase = true)) {
+                    return "<$h>;tag=$tag"
+                }
+                return "$h;tag=$tag"
+            }
+            val toWithTag = request.headers["to"]!!.map { h -> addToHeaderTag(h, localToTag) }
+            Rlog.d(TAG, "Incoming To header normalized/tagged: ${request.headers["to"]!!} -> $toWithTag")
 
             val myHeaders = commonHeaders + //Require: precondition
                 """
-                        Contact: $contactTel
+                        Contact: $dialogContact
                         Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, INFO, MESSAGE, PRACK, OPTIONS
                         Content-Type: application/sdp
                         Require: 100rel${if (callerSupportsPrecondition) ", precondition" else ""}
                         RSeq: $mySeqCounter
-                        P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=20810b8c49752501
                         """.toSipHeadersMap() +
-                            request.headers.filter { (k, _) -> k in listOf("cseq", "via", "from", "to", "call-id") } +
+                            request.headers.filter { (k, _) -> k in listOf("cseq", "via", "from", "to", "call-id", "record-route") } +
                             mapOf("to" to toWithTag) -
                 "route" - "security-verify"
 
@@ -1681,24 +1909,26 @@ a=sendrecv
                 amrTrackDesc = amrTrackDesc,
                 dtmfTrack = dtmfTrack,
                 dtmfTrackDesc = dtmfTrackDesc,
-                callHeaders = myHeaders - "require" - "content-type" + "Supported: 100rel, replaces, timer".toSipHeadersMap(),
+                callHeaders = myHeaders - "require" - "content-type" - "p-access-network-info" + "Supported: replaces, timer".toSipHeadersMap(),
                 rtpRemoteAddr = rtpRemoteAddr,
                 rtpRemotePort = rtpRemotePort.toInt(),
                 rtpSocket =  rtpSocket,
                 sdp = mySdp,
-                hasEarlyMedia = hasEarlyMedia,
+                hasEarlyMedia = sendReliable183,
                 remoteContact = extractDestinationFromContact(request.headers["contact"]!![0]),
+                incomingResponseWriter = incomingResponseWriter,
             )
+            onIncomingCall?.invoke(Object(), m, mapOf("call-id" to incomingCallId))
 
             if (threadsStarted.compareAndSet(false, true)) {
                 callDecodeThread()
                 callEncodeThread()
             }
 
-            synchronized(prAckWaitLock) {
-                prAckWait += mySeqCounter
-            }
-            if (hasEarlyMedia) {
+            if (sendReliable183) {
+                synchronized(prAckWaitLock) {
+                    prAckWait += mySeqCounter
+                }
                 val msg =
                     SipResponse(
                         statusCode = 183,
@@ -1706,32 +1936,31 @@ a=sendrecv
                         headersParam = myHeaders,
                         body = mySdp
                     )
-                Rlog.d(TAG, "Sending $msg")
-                synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
+                Rlog.d(TAG, "Sending $msg on incoming request flow")
+                synchronized(incomingResponseWriter) { incomingResponseWriter.write(msg.toByteArray()) }
                 waitPrack(mySeqCounter)
-            }
-            if (!hasEarlyMedia) {
-                val myHeaders2 = myHeaders - "rseq" - "content-type" - "require" +
+            } else {
+                val myHeaders2 = myHeaders - "rseq" - "content-type" - "require" - "p-access-network-info" +
                     """
-Supported: 100rel, replaces, timer
-P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=4500620f331a5e06
+Supported: replaces, timer
+Content-Length: 0
 
 """.toSipHeadersMap()
                 val msg2 =
                     SipResponse(
                         statusCode = 180,
                         statusString = "Ringing",
-                        headersParam = myHeaders2
+                        headersParam = myHeaders2,
+                        autofill = false
                     )
-                Rlog.d(TAG, "Sending $msg2")
-                synchronized(socket.gWriter()) { socket.gWriter().write(msg2.toByteArray()) }
+                Rlog.d(TAG, "Sending plain 180 Ringing on incoming request flow, no reliable provisional response: $msg2")
+                synchronized(incomingResponseWriter) { incomingResponseWriter.write(msg2.toByteArray()) }
             }
         }
 
-        // Next step is 180 Ringing, handled in the thread
-        if (!hasEarlyMedia)
-            return 0
-        return 100
+        // Do not let parseMessage auto-generate a 100 Trying with a different To-tag.
+        // The first response for this test path is our explicit 180 Ringing from the call thread.
+        return 0
     }
 
     fun handleSms(request: SipRequest): Int {
