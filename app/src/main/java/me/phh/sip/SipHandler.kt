@@ -2020,9 +2020,34 @@ a=sendrecv
         }
     }
 
+    private fun extractUriFromNameAddr(header: String): String {
+        val trimmed = header.trim()
+        val nameAddrUri = Regex("<\\s*([^>]+)\\s*>").find(trimmed)?.groups?.get(1)?.value
+        return (nameAddrUri ?: trimmed.substringBefore(";")).trim()
+    }
+
+    private fun extractCallerNumberFromHeader(header: String): String {
+        val uri = extractUriFromNameAddr(header)
+        val number = when {
+            uri.startsWith("tel:", ignoreCase = true) ->
+                uri.substringAfter(":").substringBefore(";")
+            uri.startsWith("sip:", ignoreCase = true) || uri.startsWith("sips:", ignoreCase = true) ->
+                uri.substringAfter(":").substringBefore("@").substringBefore(";")
+            else -> uri.substringBefore(";")
+        }.trim().trim('<', '>', '"')
+
+        return number.ifBlank { header }
+    }
+
     fun extractDestinationFromContact(contact: String): String {
-        val r = Regex(".*<(sip:[^>]*)>.*")
-        return r.find(contact)!!.groups[1]!!.value
+        val uri = extractUriFromNameAddr(contact)
+        return if (uri.startsWith("sip:", ignoreCase = true) ||
+            uri.startsWith("sips:", ignoreCase = true) ||
+            uri.startsWith("tel:", ignoreCase = true)) {
+            uri
+        } else {
+            contact
+        }
     }
 
     val callStopped = AtomicBoolean(false)
@@ -2171,9 +2196,8 @@ a=sendrecv
         }
 
         val f = request.headers["from"]
-        val r = Regex(".*(sip|tel):([^@]*).*")
-        val m = r.find(f!![0]!!)!!.groups[2]!!.value
-        Rlog.d(TAG, "Incoming call from $m callId=$incomingCallId hasIncomingResponseWriter=${requestWriters.containsKey(incomingCallId)}")
+        val m = extractCallerNumberFromHeader(f!![0]!!)
+        Rlog.d(TAG, "Incoming call from $m rawFrom=${f[0]} callId=$incomingCallId hasIncomingResponseWriter=${requestWriters.containsKey(incomingCallId)}")
 
         // We'll have three states:
         // - 100 Trying (this will be done by returning 100 in this function)
