@@ -2523,6 +2523,31 @@ a=sendrecv
             return handleInDialogInvite(request, existingCall!!, incomingResponseWriter)
         }
 
+        val activeCallId = existingCall?.callHeaders?.get("call-id")?.getOrNull(0)
+        if (existingCall != null && activeCallId != incomingCallId) {
+            val activeDirection = if (existingCall.outgoing) "outgoing" else "incoming"
+            val incomingCseq = request.headers["cseq"]?.getOrNull(0).orEmpty()
+            Rlog.w(
+                TAG,
+                "Rejecting second incoming INVITE while busy: " +
+                    "callId=$incomingCallId cseq=$incomingCseq " +
+                    "activeCallId=$activeCallId activeDirection=$activeDirection"
+            )
+            return 486
+        }
+
+        val pendingOutgoingCallId = pendingOutgoingInvite?.callId
+        if (pendingOutgoingCallId != null && pendingOutgoingCallId != incomingCallId) {
+            val incomingCseq = request.headers["cseq"]?.getOrNull(0).orEmpty()
+            Rlog.w(
+                TAG,
+                "Rejecting incoming INVITE while outgoing INVITE is pending: " +
+                    "callId=$incomingCallId cseq=$incomingCseq " +
+                    "pendingOutgoingCallId=$pendingOutgoingCallId"
+            )
+            return 486
+        }
+
         callStopped.set(false)
         callStarted.set(false)
         threadsStarted.set(false)
