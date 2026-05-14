@@ -157,6 +157,10 @@ class SipHandler(val ctxt: Context) {
     private val reconnecting = AtomicBoolean(false)
     private val reconnectRetryScheduled = AtomicBoolean(false)
     private val imsNetworkRequestRestartScheduled = AtomicBoolean(false)
+    private val outgoingConnectedCallIds = java.util.Collections.newSetFromMap(
+        java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    )
+
 
     private val imsConnectFailureCount = AtomicInteger(0)
     private val reconnectGeneration = AtomicInteger(0)
@@ -1662,13 +1666,25 @@ a=sendrecv
             return
         }
 
-        if (call.outgoingConnectedNotified.compareAndSet(false, true)) {
-            Rlog.d(TAG, "Outgoing call connected after remote RTP: callId=$callId reason=$reason")
-            onOutgoingCallConnected?.invoke(
-                Object(),
-                mapOf("call-id" to callId, "connectedReason" to reason)
-            )
+        if (callId.isBlank()) {
+            if (!call.outgoingConnectedNotified.compareAndSet(false, true)) {
+                Rlog.d(TAG, "Suppress duplicate outgoing connected callback without Call-ID reason=$reason")
+                return
+            }
+        } else {
+            if (!outgoingConnectedCallIds.add(callId)) {
+                call.outgoingConnectedNotified.set(true)
+                Rlog.d(TAG, "Suppress duplicate outgoing connected callback callId=$callId reason=$reason")
+                return
+            }
+            call.outgoingConnectedNotified.set(true)
         }
+
+        Rlog.d(TAG, "Outgoing call connected after remote RTP: callId=$callId reason=$reason")
+        onOutgoingCallConnected?.invoke(
+            Object(),
+            mapOf("call-id" to callId, "connectedReason" to reason)
+        )
     }
 
     private fun scheduleOutgoingPostAnswerRtpTimeout(callId: String, timeoutMs: Long = 2_000L) {
@@ -1682,6 +1698,7 @@ a=sendrecv
                 if (!callStarted.get()) return@thread
 
                 Rlog.w(TAG, "No post-answer RTP within ${timeoutMs}ms for outgoing call; terminating no-media dialog as network reject callId=$callId")
+                outgoingConnectedCallIds.remove(callId)
                 callStopped.set(true)
                 callStarted.set(false)
                 threadsStarted.set(false)
@@ -1877,6 +1894,7 @@ a=sendrecv
         closeRtpSocket: Boolean = false,
         reason: String,
     ) {
+        outgoingConnectedCallIds.remove(callId)
         val pending = pendingOutgoingInvite ?: return
         if (callId != null && pending.callId != callId) return
 
