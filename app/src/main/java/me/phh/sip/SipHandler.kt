@@ -1478,11 +1478,19 @@ a=sendrecv
                 }
             }
             Rlog.d(TAG, "Encode thread exiting: callStopped=${callStopped.get()}, genMismatch=${callGeneration.get() != gen}, totalPacketsSent=$sequenceNumber")
-            audioRecord.stop()
-            audioRecord.release()
-            encoder.stop()
-            encoder.release()
-            audioManager.mode = prevAudioMode
+            try { audioRecord.stop() } catch (t: Throwable) { Rlog.d(TAG, "AudioRecord stop failed during encode cleanup", t) }
+            try { audioRecord.release() } catch (t: Throwable) { Rlog.d(TAG, "AudioRecord release failed during encode cleanup", t) }
+            try { encoder.stop() } catch (t: Throwable) { Rlog.d(TAG, "Encoder stop failed during encode cleanup", t) }
+            try { encoder.release() } catch (t: Throwable) { Rlog.d(TAG, "Encoder release failed during encode cleanup", t) }
+            Rlog.d(TAG, "Encode thread cleanup complete before audio mode restore: callStopped=${callStopped.get()} genMismatch=${callGeneration.get() != gen}")
+            val restoreMode = when (prevAudioMode) {
+                AudioManager.MODE_IN_CALL,
+                AudioManager.MODE_IN_COMMUNICATION,
+                AudioManager.MODE_RINGTONE -> AudioManager.MODE_NORMAL
+                else -> prevAudioMode
+            }
+            Rlog.d(TAG, "AudioRecord cleanup: currentMode=${audioManager.mode} prevMode=$prevAudioMode restoreMode=$restoreMode")
+            audioManager.mode = restoreMode
         }
     }
 
@@ -2263,12 +2271,22 @@ a=sendrecv
                 val dgram = DatagramPacket(dgramBuf, dgramBuf.size)
                 val receiveCall = currentCall ?: break
                 try {
-                    receiveCall.rtpSocket.receive(dgram)
-                } catch (e: SocketTimeoutException) {
-                    Rlog.w(TAG, "RTP receive timeout: outgoing=${receiveCall.outgoing} local=${receiveCall.rtpSocket.localAddress}:${receiveCall.rtpSocket.localPort} connected=${receiveCall.rtpSocket.isConnected} remote=${receiveCall.rtpRemoteAddr}:${receiveCall.rtpRemotePort} callStopped=${callStopped.get()} genMismatch=${callGeneration.get() != gen}")
-                    continue
+                receiveCall.rtpSocket.receive(dgram)
+            } catch (e: SocketTimeoutException) {
+                Rlog.w(TAG, "RTP receive timeout: outgoing=${receiveCall.outgoing} local=${receiveCall.rtpSocket.localAddress}:${receiveCall.rtpSocket.localPort} connected=${receiveCall.rtpSocket.isConnected} remote=${receiveCall.rtpRemoteAddr}:${receiveCall.rtpRemotePort} callStopped=${callStopped.get()} genMismatch=${callGeneration.get() != gen}")
+                continue
+            } catch (e: SocketException) {
+                if (callStopped.get() || callGeneration.get() != gen || receiveCall.rtpSocket.isClosed) {
+                    Rlog.d(TAG, "RTP receive socket closed; exiting decode thread: outgoing=${receiveCall.outgoing} local=${receiveCall.rtpSocket.localAddress}:${receiveCall.rtpSocket.localPort} callStopped=${callStopped.get()} genMismatch=${callGeneration.get() != gen} closed=${receiveCall.rtpSocket.isClosed}")
+                } else {
+                    Rlog.w(TAG, "RTP receive socket exception; exiting decode thread: outgoing=${receiveCall.outgoing} local=${receiveCall.rtpSocket.localAddress}:${receiveCall.rtpSocket.localPort} connected=${receiveCall.rtpSocket.isConnected} remote=${receiveCall.rtpRemoteAddr}:${receiveCall.rtpRemotePort}", e)
                 }
-                receivedCount++
+                break
+            } catch (t: Throwable) {
+                Rlog.w(TAG, "Unexpected RTP receive failure; exiting decode thread", t)
+                break
+            }
+            receivedCount++
 
                 // Check RTP payload type and convert AMR-NB bandwidth-efficient RTP
                 // payloads into generic AMR storage frames for MediaCodec.  The old code
@@ -2310,10 +2328,11 @@ a=sendrecv
                     decoder.releaseOutputBuffer(outBufIndex, false)
                 }
             }
-            audioTrack.stop()
-            audioTrack.release()
-            decoder.stop()
-            decoder.release()
+            try { audioTrack.stop() } catch (t: Throwable) { Rlog.d(TAG, "AudioTrack stop failed during decode cleanup", t) }
+            try { audioTrack.release() } catch (t: Throwable) { Rlog.d(TAG, "AudioTrack release failed during decode cleanup", t) }
+            try { decoder.stop() } catch (t: Throwable) { Rlog.d(TAG, "Decoder stop failed during decode cleanup", t) }
+            try { decoder.release() } catch (t: Throwable) { Rlog.d(TAG, "Decoder release failed during decode cleanup", t) }
+            Rlog.d(TAG, "Decode thread cleanup complete: callStopped=${callStopped.get()} genMismatch=${callGeneration.get() != gen} received=$receivedCount")
         }
     }
 
