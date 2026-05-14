@@ -30,12 +30,6 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.thread
 import kotlin.concurrent.withLock
 
-private data class smsHeaders(
-    val dest: String,
-    val callId: String,
-    val cseq: String,
-)
-
 class SipHandler(val ctxt: Context) {
     companion object {
         private const val TAG = "PHH SipHandler"
@@ -74,59 +68,6 @@ class SipHandler(val ctxt: Context) {
     val forceSmsc = when(mcc + mnc) {
         "450006" -> "821080010585" // LG U+
         else -> null
-    }
-
-    private fun decodeSmscScaPdu(raw: String?): String? {
-        val hex = raw
-            ?.trim()
-            ?.trim('"')
-            ?.replace(Regex("\\s+"), "")
-            ?: return null
-
-        if (!hex.matches(Regex("(?i)[0-9a-f]+")) || hex.length < 4 || hex.length % 2 != 0) {
-            return null
-        }
-
-        return try {
-            val scaLen = hex.substring(0, 2).toInt(16)
-            val expectedLen = (1 + scaLen) * 2
-            if (scaLen < 2 || hex.length != expectedLen) return null
-
-            val addrHex = hex.substring(4, expectedLen)
-            val digits = addrHex.chunked(2).joinToString("") { octet ->
-                "${octet[1]}${octet[0]}"
-            }.trimEnd('F', 'f')
-
-            if (digits.length < 5) return null
-
-            // 0x91 = international ISDN/telephone number. For RP-DATA we pass the
-            // canonical digits and add '+' later when building the RP SMSC address.
-            digits.takeIf { it.all(Char::isDigit) }
-        } catch (t: Throwable) {
-            null
-        }
-    }
-
-    private fun normalizeSmscNumber(raw: String?): String? {
-        val trimmed = raw
-            ?.trim()
-            ?.trim('"')
-            ?.takeIf { it.isNotBlank() && it != "null" }
-            ?: return null
-
-        decodeSmscScaPdu(trimmed)?.let { decoded ->
-            Rlog.d(TAG, "Decoded SMSC SCA-PDU $trimmed -> $decoded")
-            return decoded
-        }
-
-        val strictNumber = Regex("""^\+?([0-9]{5,20})$""").matchEntire(trimmed)
-        if (strictNumber != null) return strictNumber.groupValues[1]
-
-        // RIL GET_SMSC_ADDRESS can be returned as: "491760000443",145
-        val looseNumber = Regex("""\+?([0-9]{5,20})""").find(trimmed)
-        if (looseNumber != null) return looseNumber.groupValues[1]
-
-        return null
     }
     // Sess is more secure so default to it
     val requireNonsessAka = when(mcc + mnc) {
@@ -1387,62 +1328,11 @@ a=sendrecv
         val cancelSent: AtomicBoolean = AtomicBoolean(false),
     )
 
-    private data class AmrNbFrame(
-        val ft: Int,
-        val q: Int,
-        val codecFrame: ByteArray,
-    )
-
     // AMR-NB speech payload sizes in bits for FT 0..8.
     // Codec input for Android's audio/3gpp decoder is one AMR storage frame:
     //   [frame header: 0 | FT(4) | Q | 00] + speech bits octet padded.
     // The RTP payloads used here are RFC 4867 bandwidth-efficient packets:
     //   CMR(4), F(1), FT(4), Q(1), speech bits...
-    private val amrNbSpeechBits = intArrayOf(95, 103, 118, 134, 148, 159, 204, 244, 39)
-
-    private fun readPackedBits(src: ByteArray, startBit: Int, bitCount: Int): ByteArray {
-        val out = ByteArray((bitCount + 7) / 8)
-        for (i in 0 until bitCount) {
-            val srcBit = startBit + i
-            val bit = (src[srcBit / 8].toInt() ushr (7 - (srcBit % 8))) and 1
-            if (bit != 0) {
-                out[i / 8] = (out[i / 8].toInt() or (1 shl (7 - (i % 8)))).toByte()
-            }
-        }
-        return out
-    }
-
-    private fun amrNbFrameFromBandwidthEfficientRtp(buf: ByteArray, length: Int): AmrNbFrame? {
-        val payloadOffset = 12
-        if (length < payloadOffset + 2) return null
-
-        val ft = ((buf[payloadOffset].toUByte().toInt() and 0x07) shl 1) or
-            ((buf[payloadOffset + 1].toUByte().toInt() ushr 7) and 0x01)
-        val q = (buf[payloadOffset + 1].toUByte().toInt() ushr 6) and 0x01
-
-        // FT=15 is No-Data. FT=8 is SID; pass it through because Android's AMR
-        // decoder accepts normal AMR storage frames and this avoids decoder state gaps.
-        if (ft == 15) return null
-        if (ft !in amrNbSpeechBits.indices) {
-            Rlog.w(TAG, "Unsupported AMR-NB RTP frame type ft=$ft length=$length")
-            return null
-        }
-
-        val speechBits = amrNbSpeechBits[ft]
-        val speechStartBit = payloadOffset * 8 + 10
-        val availableBits = length * 8 - speechStartBit
-        if (availableBits < speechBits) {
-            Rlog.w(TAG, "Short AMR-NB RTP payload ft=$ft length=$length availableBits=$availableBits needed=$speechBits")
-            return null
-        }
-
-        val frameHeader = ((ft shl 3) or (q shl 2)).toByte()
-        return AmrNbFrame(
-            ft = ft,
-            q = q,
-            codecFrame = byteArrayOf(frameHeader) + readPackedBits(buf, speechStartBit, speechBits),
-        )
-    }
 
 
     @SuppressLint("MissingPermission")
@@ -2452,36 +2342,6 @@ a=sendrecv
             audioTrack.release()
             decoder.stop()
             decoder.release()
-        }
-    }
-
-    private fun extractUriFromNameAddr(header: String): String {
-        val trimmed = header.trim()
-        val nameAddrUri = Regex("<\\s*([^>]+)\\s*>").find(trimmed)?.groups?.get(1)?.value
-        return (nameAddrUri ?: trimmed.substringBefore(";")).trim()
-    }
-
-    private fun extractCallerNumberFromHeader(header: String): String {
-        val uri = extractUriFromNameAddr(header)
-        val number = when {
-            uri.startsWith("tel:", ignoreCase = true) ->
-                uri.substringAfter(":").substringBefore(";")
-            uri.startsWith("sip:", ignoreCase = true) || uri.startsWith("sips:", ignoreCase = true) ->
-                uri.substringAfter(":").substringBefore("@").substringBefore(";")
-            else -> uri.substringBefore(";")
-        }.trim().trim('<', '>', '"')
-
-        return number.ifBlank { header }
-    }
-
-    fun extractDestinationFromContact(contact: String): String {
-        val uri = extractUriFromNameAddr(contact)
-        return if (uri.startsWith("sip:", ignoreCase = true) ||
-            uri.startsWith("sips:", ignoreCase = true) ||
-            uri.startsWith("tel:", ignoreCase = true)) {
-            uri
-        } else {
-            contact
         }
     }
 
