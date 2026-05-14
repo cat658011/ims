@@ -315,12 +315,15 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
         sipHandler.onCancelledCall = { param: Object, reason: String, map: Map<String, String> ->
     Rlog.d(TAG, "Cancelling call")
     val statusCode = map["statusCode"]?.toInt() ?: -1
-    val reasonInfo = if (statusCode >= 400) {
-        val statusMessage = map["statusString"] ?: "Kikoo"
-        ImsReasonInfo(ImsReasonInfo.CODE_NETWORK_REJECT, 0, statusMessage)
-    } else {
-        ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "Kikoo")
-    }
+            val statusMessage = map["statusString"] ?: "Kikoo"
+            val localReject = map["localReject"] == "true"
+            val reasonInfo = if (localReject) {
+                ImsReasonInfo(ImsReasonInfo.CODE_USER_DECLINE, 0, statusMessage)
+            } else if (statusCode >= 400) {
+                ImsReasonInfo(ImsReasonInfo.CODE_NETWORK_REJECT, 0, statusMessage)
+            } else {
+                ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "Kikoo")
+            }
 
     if (outgoingCallActive) {
         outgoingCallListener?.callSessionTerminated(reasonInfo)

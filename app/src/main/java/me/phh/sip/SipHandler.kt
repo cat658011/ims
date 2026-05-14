@@ -192,7 +192,39 @@ class SipHandler(val ctxt: Context) {
         }
     }
 
-    fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
+    
+    private fun sendRtpPacket(
+        rtpSocket: DatagramSocket,
+        bytes: ByteArray,
+        remoteAddr: InetAddress,
+        remotePort: Int,
+        label: String,
+    ): Boolean {
+        return try {
+            val packet = if (rtpSocket.isConnected) {
+                // A connected DatagramSocket must be sent without an explicit packet
+                // address on Android; otherwise libcore can throw
+                // "connected address and packet address differ" even when the
+                // dialog was only re-targeted by SDP/UPDATE during the call.
+                DatagramPacket(bytes, bytes.size)
+            } else {
+                DatagramPacket(bytes, bytes.size, remoteAddr, remotePort)
+            }
+            rtpSocket.send(packet)
+            true
+        } catch (t: Throwable) {
+            Rlog.e(
+                TAG,
+                "Failed to send $label: connected=${rtpSocket.isConnected} " +
+                    "socketRemote=${rtpSocket.inetAddress}:${rtpSocket.port} " +
+                    "packetRemote=$remoteAddr:$remotePort",
+                t
+            )
+            false
+        }
+    }
+
+fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         dispatcher.setRequestCallback(method, cb)
     }
 
@@ -1347,7 +1379,7 @@ a=sendrecv
                 val dgramPacket =
                     DatagramPacket(buf, buf.size, sendCall.rtpRemoteAddr, sendCall.rtpRemotePort)
                 try {
-                    sendCall.rtpSocket.send(dgramPacket)
+                    if (!sendRtpPacket(sendCall.rtpSocket, buf, sendCall.rtpRemoteAddr, sendCall.rtpRemotePort, "RTP packet #$sequenceNumber")) throw IOException("RTP send failed")
                 } catch (e: Exception) {
                     Rlog.w(TAG, "Silence RTP send failed, stopping encode thread: ${e.message}", e)
                     encoder.stop()
@@ -1481,7 +1513,7 @@ a=sendrecv
 
                         val dgramPacket = DatagramPacket(buf, buf.size, sendCall.rtpRemoteAddr, sendCall.rtpRemotePort)
                         try {
-                            sendCall.rtpSocket.send(dgramPacket)
+                            if (!sendRtpPacket(sendCall.rtpSocket, buf, sendCall.rtpRemoteAddr, sendCall.rtpRemotePort, "RTP packet #$sequenceNumber")) throw IOException("RTP send failed")
                             if (realFrameCount < 10) {
                                 Rlog.d(TAG, "Sent RTP packet #$sequenceNumber ft=$ft ts=$timestamp payload=${buf.drop(12).take(4).joinToString(" ") { "%02x".format(it) }}... to ${sendCall.rtpRemoteAddr}:${sendCall.rtpRemotePort}")
                             }
@@ -1676,7 +1708,12 @@ a=sendrecv
             incomingAcceptedAwaitingAck.set(false)
             incomingHangupAfterAck.set(false)
             currentCall = null
-            onCancelledCall?.invoke(Object(), "", mapOf("call-id" to rejectedCallId))
+            onCancelledCall?.invoke(Object(), "", mapOf(
+                "call-id" to rejectedCallId,
+                "statusCode" to "603",
+                "statusString" to "Decline",
+                "localReject" to "true",
+            ))
         }
     }
 
@@ -2432,7 +2469,7 @@ a=sendrecv
                         (duration shr 8).toByte(), (duration and 0xff).toByte(),
                     )
                     val buf = rtpHeader + payload
-                    sendCall.rtpSocket.send(DatagramPacket(buf, buf.size, sendCall.rtpRemoteAddr, sendCall.rtpRemotePort))
+                    if (!sendRtpPacket(sendCall.rtpSocket, buf, sendCall.rtpRemoteAddr, sendCall.rtpRemotePort, "RTP DTMF event=$event char=$c seq=$sequenceNumber")) return@thread
                     Thread.sleep(20)
                 }
             } catch (t: Throwable) {
