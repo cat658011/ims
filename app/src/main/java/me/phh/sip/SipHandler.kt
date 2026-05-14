@@ -1157,6 +1157,15 @@ class SipHandler(val ctxt: Context) {
         if (call != null && !call.outgoing && currentCallId == callId) {
             callStarted.set(true)
             incomingAcceptedAwaitingAck.set(false)
+
+            if (threadsStarted.compareAndSet(false, true)) {
+                Rlog.d(TAG, "Starting incoming media threads from final ACK")
+                callDecodeThread()
+                callEncodeThread()
+            } else {
+                Rlog.d(TAG, "Incoming media threads already started before final ACK")
+            }
+
             onIncomingCallConnected?.invoke(Object(), mapOf("call-id" to callId))
 
             if (incomingHangupAfterAck.getAndSet(false)) {
@@ -2925,10 +2934,7 @@ a=sendrecv
             )
             onIncomingCall?.invoke(Object(), m, mapOf("call-id" to incomingCallId))
 
-            if (threadsStarted.compareAndSet(false, true)) {
-                callDecodeThread()
-                callEncodeThread()
-            }
+                        Rlog.d(TAG, "Deferring incoming media threads until final ACK")
 
             if (sendReliable183) {
                 synchronized(prAckWaitLock) {
