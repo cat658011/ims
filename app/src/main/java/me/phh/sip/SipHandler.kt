@@ -163,8 +163,29 @@ class SipHandler(val ctxt: Context) {
     var imsFailureCallback: (() -> Unit)? = null
     var imsRegisteringCallback: ((Int) -> Unit)? = null
     private var imsRegistrationTech = REGISTRATION_TECH_LTE
-    var onSmsReceived: ((Int, String, ByteArray) -> Unit)? = null
-    var onSmsStatusReportReceived: ((Int, String, ByteArray) -> Unit)? = null
+    private val smsHandler = SipSmsHandler(
+        tag = TAG,
+        ctxt = ctxt,
+        subId = subId,
+        forceSmscProvider = { forceSmsc },
+        realmProvider = { realm },
+        commonHeadersProvider = { commonHeaders },
+        mySipProvider = { mySip },
+        writerProvider = { socket.gWriter() },
+        responseCallbackSetter = { callId, cb -> setResponseCallback(callId, cb) },
+    )
+
+    var onSmsReceived: ((Int, String, ByteArray) -> Unit)?
+        get() = smsHandler.onSmsReceived
+        set(value) {
+            smsHandler.onSmsReceived = value
+        }
+
+    var onSmsStatusReportReceived: ((Int, String, ByteArray) -> Unit)?
+        get() = smsHandler.onSmsStatusReportReceived
+        set(value) {
+            smsHandler.onSmsStatusReportReceived = value
+        }
     var onIncomingCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
         null
     var onOutgoingCallConnected: ((handle: Object, extras: Map<String, String>) -> Unit)? =
@@ -172,10 +193,7 @@ class SipHandler(val ctxt: Context) {
     var onIncomingCallConnected: ((handle: Object, extras: Map<String, String>) -> Unit)? =
         null
     var onCancelledCall: ((handle: Object, from: String, extras: Map<String, String>) -> Unit)? =
-        null
-    private val smsLock = ReentrantLock()
-    private var smsToken = 0
-    private val smsHeadersMap = mutableMapOf<Int, smsHeaders>()
+        null 
 
     private fun stopCallRuntime(reason: String) {
         Rlog.d(TAG, "Stopping call runtime state: $reason")
@@ -293,7 +311,7 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         }
         dispatcher.clearCallbacks()
         dispatcher.clearWriters()
-        smsLock.withLock { smsHeadersMap.clear() }
+        smsHandler.clearState()
     }
 
     private fun closeSipTransports(reason: String) {
@@ -3082,173 +3100,19 @@ Content-Length: 0
         return 0
     }
 
-    fun handleSms(request: SipRequest): Int {
-        val sms = request.body.SipSmsDecode()
-        if (sms == null) {
-            Rlog.w(TAG, "Could not decode sms pdu")
-            return 500
-        }
-        Rlog.d(TAG, "Decoded SMS type ${sms.type}, ${sms.pdu?.toString()}")
-        when (sms.type) {
-            SmsType.RP_DATA_FROM_NETWORK -> {
-                val receivedCb = onSmsReceived
-                if (receivedCb == null) {
-                    Rlog.d(TAG, "No onSmsReceived callback!")
-                    return 500
-                }
-
-                val token = smsLock.withLock { smsToken++ }
-                val dest =
-                    request.headers["from"]!![0]
-                        .getParams()
-                        .component1()
-                        .trimStart('<')
-                        .trimEnd('>')
-                val callId = request.headers["call-id"]!![0]
-                val cseq = request.headers["cseq"]!![0]
-                smsHeadersMap[token] = smsHeaders(dest, callId, cseq)
-                try {
-                    receivedCb(token, "3gpp", sms.pdu!!)
-                } catch(t: Throwable) {
-                    Rlog.d(TAG, "Failed sending SMS to framework", t);
-                }
-            }
-            SmsType.RP_ACK_FROM_NETWORK -> {
-                try {
-                    onSmsStatusReportReceived?.invoke(sms.ref.toInt(), "3gpp", ByteArray(2))
-                } catch(t: Throwable) {
-                    Rlog.d(TAG, "Failed sending SMS ACK to framework", t)
-                }
-            }
-            SmsType.RP_ERROR_FROM_NETWORK -> {
-                Rlog.d(TAG, "SMS error from network")
-            }
-            else -> return 500
-        }
-        return 200
-    }
+    fun handleSms(request: SipRequest): Int = smsHandler.handleSms(request)
 
     fun sendSms(
         smsSmsc: String?,
         pdu: ByteArray,
         ref: Int,
         successCb: (() -> Unit),
-        failCb: (() -> Unit)
+        failCb: (() -> Unit),
     ) {
-        val smsManager =
-            ctxt.getSystemService(SmsManager::class.java).createForSubscriptionId(subId)
-        val smscIdentity = try {
-            val i = smsManager
-                .javaClass.getMethod("getSmscIdentity")
-                .invoke(smsManager) as? Uri
-            if (i?.host.isNullOrBlank()) null else i
-        } catch (t: Throwable) { null }
-        Rlog.d(TAG, "Got smscIdentity $smscIdentity")
-
-        val frameworkSmsc = normalizeSmscNumber(smsSmsc)
-        val identitySmsc = normalizeSmscNumber(smscIdentity?.host)
-        val managerSmsc = try {
-            val smscStr = smsManager.smscAddress
-            val parsed = normalizeSmscNumber(smscStr)
-            Rlog.d(TAG, "Got smsc $smscStr, parsed $parsed")
-            parsed
-        } catch(t: Throwable) {
-            Rlog.d(TAG, "smscAddress failed", t)
-            null
-        }
-
-        // make ref up?
-        val smsc =
-            frameworkSmsc
-                ?: forceSmsc
-                ?: identitySmsc
-                ?: managerSmsc
-
-        // RP-DATA destination address. Passing an empty string makes
-        // PhoneNumberUtils.numberToCalledPartyBCD("") return null and crashes
-        // SipSmsEncodeSms(), so keep it null when we genuinely do not know it.
-        val rpSmsc = smsc?.let { "+$it" }
-        val data = SipSmsEncodeSms(ref.toByte(), rpSmsc, pdu)
-        Rlog.d(TAG, "sending sms ${data.toHex()} to smsc $smsc rpSmsc=$rpSmsc")
-
-        fun normalizeSipTarget(raw: String): String =
-            if (raw.startsWith("sip:", ignoreCase = true) || raw.startsWith("tel:", ignoreCase = true)) raw else "sip:$raw"
-
-        val smscSipIdentity = smscIdentity?.toString()?.let { normalizeSipTarget(it) }
-        val requestUri = smscSipIdentity ?: "sip:$realm"
-        val dest = smscSipIdentity ?: smsc?.let { "sip:+$it@$realm" } ?: "sip:$realm"
-
-        // "sip:ipsmgw.lte-lguplus.co.kr",
-        val msg =
-            SipRequest(
-                SipMethod.MESSAGE,
-                requestUri,
-                commonHeaders +
-                    """
-                    From: <$mySip>
-                    To: <$dest>
-                    P-Preferred-Identity: <$mySip>
-                    P-Asserted-Identity: <$mySip>
-                    Expires: 600000
-                    Content-Type: application/vnd.3gpp.sms
-                    Supported: sec-agree, path
-                    Require: sec-agree
-                    Proxy-Require: sec-agree
-                    Allow: MESSAGE
-                    Accept-Contact: *;+g.3gpp.smsip;require;explicit
-                    Request-Disposition: no-fork
-                    """.toSipHeadersMap(),
-                data
-            )
-        setResponseCallback(
-            msg.headers["call-id"]!![0],
-            { resp: SipResponse ->
-                if (resp.statusCode == 200 || resp.statusCode == 202) {
-                    successCb()
-                } else {
-                    failCb()
-                }
-                true
-            }
-        )
-        Rlog.d(TAG, "Sending $msg")
-        synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
+        smsHandler.sendSms(smsSmsc, pdu, ref, successCb, failCb)
     }
 
-    fun sendSmsAck(token: Int, ref: Int, error: Boolean): Unit {
-        Rlog.d(TAG, "sending sms ack")
-        val body = SipSmsEncodeAck(ref.toByte())
-        val headers = smsHeadersMap.remove(token)
-        if (headers == null) {
-            // XXX return error?
-            return
-        }
-        // do not send ack on error
-        // Should we send an error report?
-        if (error) {
-            return
-        }
-        val msg =
-            SipRequest(
-                SipMethod.MESSAGE,
-                headers.dest,
-                commonHeaders +
-                    """
-                    Cseq: ${headers.cseq}
-                    In-Reply-To: ${headers.callId}
-                    Content-Type: application/vnd.3gpp.sms
-                    Proxy-Require: sec-agree
-                    Require: sec-agree
-                    Allow: MESSAGE
-                    Supported: path, gruu, sec-agree
-                    Request-Disposition: no-fork
-                    Accept-Contact: *;+g.3gpp.smsip
-                    """.toSipHeadersMap(),
-                body
-            )
-        // ignore response
-        setResponseCallback(msg.headers["call-id"]!![0], { true })
-        Rlog.d(TAG, "Sending $msg")
-        synchronized(socket.gWriter()) { socket.gWriter().write(msg.toByteArray()) }
+    fun sendSmsAck(token: Int, ref: Int, error: Boolean) {
+        smsHandler.sendSmsAck(token, ref, error)
     }
 }
