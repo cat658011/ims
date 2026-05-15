@@ -148,7 +148,12 @@ class SipHandler(val ctxt: Context) {
 
     private val reconnecting = AtomicBoolean(false)
     private val reconnectRetryScheduled = AtomicBoolean(false)
-    private val imsNetworkRequestRestartScheduled = AtomicBoolean(false)
+
+    private val imsNetworkRequestRestarter = ImsNetworkRequestRestarter(
+        tag = TAG,
+        telephonyManager = telephonyManager,
+        requestImsNetwork = { getVolteNetwork() },
+    )
     private val outgoingConnectedCallIds = java.util.Collections.newSetFromMap(
         java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     )
@@ -311,29 +316,7 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         ImsNetworkState.isRatReadyForImsNetworkRequest(TAG, telephonyManager)
 
     private fun scheduleImsNetworkRequestRestart(reason: String, initialDelayMs: Long = 12_000L) {
-        if (!imsNetworkRequestRestartScheduled.compareAndSet(false, true)) {
-            Rlog.w(TAG, "IMS network request restart already scheduled, ignore: $reason")
-            return
-        }
-        thread {
-            try {
-                var delayMs = initialDelayMs
-                while (true) {
-                    Rlog.w(TAG, "Will request IMS network after ${delayMs}ms if RAT is IMS-capable: $reason")
-                    Thread.sleep(delayMs)
-                    if (isRatReadyForImsNetworkRequest()) {
-                        Rlog.w(TAG, "Re-requesting IMS network after RAT recovered: $reason")
-                        getVolteNetwork()
-                        return@thread
-                    }
-                    delayMs = 5_000L
-                }
-            } catch (t: Throwable) {
-                Rlog.e(TAG, "IMS network request restart failed: $reason", t)
-            } finally {
-                imsNetworkRequestRestartScheduled.set(false)
-            }
-        }
+        imsNetworkRequestRestarter.schedule(reason, initialDelayMs)
     }
 
     private fun shouldReconnectAfterSipTransportLoss(reason: String): Boolean {
