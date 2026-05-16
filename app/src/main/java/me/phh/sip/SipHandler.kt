@@ -338,38 +338,12 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
     }
 
 
-    private fun closeBounded(
-        label: String,
-        timeoutMs: Long = 1_000L,
-        close: () -> Unit,
-    ) {
-        val finished = AtomicBoolean(false)
-        var failure: Throwable? = null
-        val closeThread = thread(name = "PhhImsClose-$label", isDaemon = true) {
-            try {
-                close()
-            } catch (t: Throwable) {
-                failure = t
-            } finally {
-                finished.set(true)
-            }
-        }
-
-        closeThread.join(timeoutMs)
-        if (!finished.get()) {
-            Rlog.w(TAG, "close $label still running after ${timeoutMs}ms; continuing IMS reconnect")
-            return
-        }
-
-        failure?.let { Rlog.d(TAG, "close $label failed", it) }
-    }
-
     private fun closeSipTransports(reason: String) {
         Rlog.w(TAG, "Closing SIP transports: $reason")
-        closeBounded("plainSocket") { if (this::plainSocket.isInitialized) plainSocket.close() }
-        closeBounded("socket") { if (this::socket.isInitialized) socket.close() }
-        closeBounded("TCP server") { if (this::serverSocket.isInitialized) serverSocket.close() }
-        closeBounded("UDP server") { if (this::serverSocketUdp.isInitialized) serverSocketUdp.close() }
+        BoundedCloser.close(TAG, "plainSocket") { if (this::plainSocket.isInitialized) plainSocket.close() }
+        BoundedCloser.close(TAG, "socket") { if (this::socket.isInitialized) socket.close() }
+        BoundedCloser.close(TAG, "TCP server") { if (this::serverSocket.isInitialized) serverSocket.close() }
+        BoundedCloser.close(TAG, "UDP server") { if (this::serverSocketUdp.isInitialized) serverSocketUdp.close() }
     }
 
 
@@ -458,12 +432,12 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         ipsecResourcesClosed = true
         Rlog.w(TAG, "Closing SIP IPsec resources: $reason")
 
-        closeBounded("serverInTransform") { settings.serverInTransform?.close() }
-        closeBounded("serverOutTransform") { settings.serverOutTransform?.close() }
-        closeBounded("serverSpiC") { settings.serverSpiC?.close() }
-        closeBounded("serverSpiS") { settings.serverSpiS?.close() }
-        closeBounded("clientSpiC") { settings.clientSpiC.close() }
-        closeBounded("clientSpiS") { settings.clientSpiS.close() }
+        BoundedCloser.close(TAG, "serverInTransform") { settings.serverInTransform?.close() }
+        BoundedCloser.close(TAG, "serverOutTransform") { settings.serverOutTransform?.close() }
+        BoundedCloser.close(TAG, "serverSpiC") { settings.serverSpiC?.close() }
+        BoundedCloser.close(TAG, "serverSpiS") { settings.serverSpiS?.close() }
+        BoundedCloser.close(TAG, "clientSpiC") { settings.clientSpiC.close() }
+        BoundedCloser.close(TAG, "clientSpiS") { settings.clientSpiS.close() }
     }
     private fun dropImsConnection(reason: String) {
         val wasReady = imsReady
