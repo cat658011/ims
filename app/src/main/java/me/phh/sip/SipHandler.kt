@@ -662,14 +662,7 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
 
         reconnectController.markConnected()
 
-        setResponseCallback(registerHeaders["call-id"]!![0], ::registerCallback)
-        setRequestCallback(SipMethod.MESSAGE, ::handleSms)
-        setRequestCallback(SipMethod.INVITE, ::handleCall)
-        setRequestCallback(SipMethod.PRACK, ::handlePrack)
-        setRequestCallback(SipMethod.ACK, ::handleAck)
-        setRequestCallback(SipMethod.CANCEL, ::handleCancel)
-        setRequestCallback(SipMethod.BYE, ::handleCancel)
-        setRequestCallback(SipMethod.UPDATE, ::handleUpdate)
+        installSipCallbacks()
         handleResponse(regReply)
 
         // two ways we'll get incoming messages:
@@ -731,6 +724,17 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
                 Rlog.d(TAG, "Got exception in UDP server socket", t)
             }
         }
+    }
+
+    private fun installSipCallbacks() {
+        setResponseCallback(registerHeaders["call-id"]!![0], ::registerCallback)
+        setRequestCallback(SipMethod.MESSAGE, ::handleSms)
+        setRequestCallback(SipMethod.INVITE, ::handleCall)
+        setRequestCallback(SipMethod.PRACK, ::handlePrack)
+        setRequestCallback(SipMethod.ACK, ::handleAck)
+        setRequestCallback(SipMethod.CANCEL, ::handleCancel)
+        setRequestCallback(SipMethod.BYE, ::handleCancel)
+        setRequestCallback(SipMethod.UPDATE, ::handleUpdate)
     }
 
     fun getVolteNetwork() {
