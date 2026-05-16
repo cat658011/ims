@@ -3083,18 +3083,7 @@ a=sendrecv
             // Important for tel: URIs: without <> the appended ;tag can be parsed as a TEL URI
             // parameter instead of a SIP To header parameter, and the network may ignore our 200 OK.
             val localToTag = randomBytes(6).toHex()
-            fun addToHeaderTag(header: String, tag: String): String {
-                val h = header.trim()
-                if (h.contains(";tag=", ignoreCase = true)) return h
-                if (h.contains(">")) return "$h;tag=$tag"
-                if (h.startsWith("sip:", ignoreCase = true) ||
-                    h.startsWith("sips:", ignoreCase = true) ||
-                    h.startsWith("tel:", ignoreCase = true)) {
-                    return "<$h>;tag=$tag"
-                }
-                return "$h;tag=$tag"
-            }
-            val toWithTag = request.headers["to"]!!.map { h -> addToHeaderTag(h, localToTag) }
+            val toWithTag = request.headers["to"]!!.map { h -> SipHeaderTagger.addTag(h, localToTag) }
             Rlog.d(TAG, "Incoming To header normalized/tagged: ${request.headers["to"]!!} -> $toWithTag")
 
             val myHeaders = commonHeaders + //Require: precondition
