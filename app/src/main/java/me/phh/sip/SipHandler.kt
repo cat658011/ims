@@ -918,25 +918,16 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
     fun updateCommonHeaders(socket: SipConnection) {
         // Note: we are giving serverSocket (TCP) port, but TCP and UDP servers use the same port
-        val local = if(socket.gLocalAddr() is Inet6Address)
-            "[${socket.gLocalAddr().hostAddress}]:${serverSocket.localPort}"
-        else
-            "${socket.gLocalAddr().hostAddress}:${serverSocket.localPort}"
-
-        val sipInstance = "<urn:gsma:imei:${imei.substring(0,8)}-${imei.substring(8,14)}-0>"
-        val transport = if (socket is SipConnectionTcp) "tcp" else "udp"
-        contact =
-            """<sip:$imsi@$local;transport=$transport>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;audio"""
-        val newHeaders =
-            (if(socket is SipConnectionTcp) {
-                """
-                Via: SIP/2.0/TCP $local;rport
-                """
-            } else {
-                """
-                Via: SIP/2.0/UDP $local;rport
-                """
-            }).toSipHeadersMap()
+        val local = SipContactHeaders.localEndpoint(socket, serverSocket.localPort)
+        val sipInstance = SipContactHeaders.sipInstanceFromImei(imei)
+        val transport = SipContactHeaders.transport(socket)
+        contact = SipContactHeaders.mmtelContact(
+            userPart = imsi,
+            localEndpoint = local,
+            transport = transport,
+            sipInstance = sipInstance,
+        )
+        val newHeaders = SipContactHeaders.viaHeaders(socket, local)
         registerHeaders += newHeaders
         commonHeaders += newHeaders
     }
@@ -1027,15 +1018,12 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
     }
 
     fun subscribe() {
-        val local =
-            if(socket.gLocalAddr() is Inet6Address)
-                "[${socket.gLocalAddr().hostAddress}]:${serverSocket.localPort}"
-            else
-                "${socket.gLocalAddr().hostAddress}:${serverSocket.localPort}"
-        val sipInstance = "<urn:gsma:imei:${imei.substring(0,8)}-${imei.substring(8,14)}-0>"
-        val transport = if (socket is SipConnectionTcp) "tcp" else "udp"
-        val contactTel =
-            """<sip:$myTel@$local;transport=$transport>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;audio"""
+        val contactTel = SipContactHeaders.mmtelContact(
+            userPart = myTel,
+            localEndpoint = SipContactHeaders.localEndpoint(socket, serverSocket.localPort),
+            transport = SipContactHeaders.transport(socket),
+            sipInstance = SipContactHeaders.sipInstanceFromImei(imei),
+        )
         val msg =
             SipRequest(
                 SipMethod.SUBSCRIBE,
