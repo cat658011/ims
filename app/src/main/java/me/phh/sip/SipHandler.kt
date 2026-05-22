@@ -985,8 +985,20 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
 
         Rlog.d(TAG, "Requesting AKA challenge")
         val akaResult = sipAkaChallenge(subTelephonyManager, registerChallenge.nonceB64)
+        val registerDigestUser = if (registerChallenge.realm.equals("ims.singtel.com", ignoreCase = true)) {
+            val singtelUser = "$imsi@${registerChallenge.realm}"
+            Rlog.w(
+                TAG,
+                "Using SingTel challenge realm in REGISTER Authorization username: " +
+                    "oldUser=$user newUser=$singtelUser",
+            )
+            singtelUser
+        } else {
+            user
+        }
+
         akaDigest = SipRegistrationDigestFactory.create(
-            user = user,
+            user = registerDigestUser,
             realm = registerChallenge.realm,
             uri = "sip:$realm",
             nonceB64 = registerChallenge.nonceB64,
