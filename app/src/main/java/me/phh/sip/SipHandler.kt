@@ -276,6 +276,7 @@ class SipHandler(
         To: <sip:$user>
         """.toSipHeadersMap() + generateCallId()
     private var commonHeaders = "".toSipHeadersMap()
+    private var registerSecurityClientOverride: String? = null
     private var contact = ""
     private var mySip = ""
     private var myTel = ""
@@ -597,6 +598,7 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         To: <sip:$user>
         """.toSipHeadersMap() + registerCallId
         commonHeaders = "".toSipHeadersMap()
+        registerSecurityClientOverride = null
         contact = ""
         mySip = ""
         myTel = ""
@@ -1014,6 +1016,28 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
             commonHeaders += ("security-verify" to securityServer)
             registerHeaders += ("security-verify" to securityServer)
             val securityServerParams = SipSecurityServerSelector.select(securityServer).params
+
+            if (registerChallenge.realm.equals("ims.singtel.com", ignoreCase = true)) {
+                val selectedAlg = securityServerParams["alg"]
+                val selectedEalg = securityServerParams["ealg"] ?: "null"
+
+                if (selectedAlg != null) {
+                    registerSecurityClientOverride = SipSecurityClientHeader.build(
+                        ipsecSettings = ipsecSettings,
+                        clientPort = socket.gLocalPort(),
+                        serverPort = serverSocket.localPort,
+                        algs = listOf(selectedAlg),
+                        ealgs = listOf(selectedEalg),
+                    )
+                    Rlog.w(
+                        TAG,
+                        "Using SingTel selected Security-Client for protected REGISTER: " +
+                            registerSecurityClientOverride,
+                    )
+                } else {
+                    Rlog.w(TAG, "Could not narrow SingTel Security-Client: missing selected alg")
+                }
+            }
 
             portS = securityServerParams["port-s"]!!.toInt()
             // spi string is 32 bit unsigned, but ipSecManager wants an int...
@@ -1437,6 +1461,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
             ipsecSettings = ipsecSettings,
             clientPort = socket.gLocalPort(),
             serverPort = serverSocket.localPort,
+            securityClientOverride = registerSecurityClientOverride,
         )
         Rlog.d(TAG, "Sending $msg")
         synchronized(writer) {
