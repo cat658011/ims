@@ -959,6 +959,20 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
             SipConnectionUdpServer(network, pcscfAddr, plainSocket.gLocalAddr(), socket.gLocalPort() + 1)
 
         Rlog.d(TAG, "Src port is ${socket.gLocalPort()}, TCP server port is ${serverSocket.localPort}, UDP server port is ${serverSocketUdp.localPort}")
+        if (mcc == "525" && mnc.padStart(3, '0') == "001") {
+            registerSecurityClientOverride = SipSecurityClientHeader.build(
+                ipsecSettings = ipsecSettings,
+                clientPort = socket.gLocalPort(),
+                serverPort = serverSocket.localPort,
+                algs = listOf("hmac-sha-1-96"),
+                ealgs = listOf("null"),
+            )
+            Rlog.w(
+                TAG,
+                "Offering SingTel null/SHA1 Security-Client for REGISTER: " +
+                    registerSecurityClientOverride,
+            )
+        }
         updateCommonHeaders(plainSocket)
         register(plainSocket.gWriter())
         val plainRegReply =
