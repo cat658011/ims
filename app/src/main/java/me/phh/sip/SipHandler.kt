@@ -507,7 +507,28 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         }
     }
 
-    private fun isOutgoingInviteAuthFailure(response: SipResponse): Boolean {
+    private fun securityVerifyHeadersForRegister(
+    securityServer: List<String>,
+    challengeRealm: String,
+): List<String> {
+    if (!challengeRealm.equals("ims.singtel.com", ignoreCase = true)) {
+        return securityServer
+    }
+
+    val strippedSecurityVerify = securityServer.map { value ->
+        value.replace(Regex(""";\s*q\s*=\s*[^;,\s]+""", RegexOption.IGNORE_CASE), "")
+    }
+
+    Rlog.w(
+        TAG,
+        "Using SingTel Security-Verify without q parameter for protected REGISTER: " +
+            strippedSecurityVerify.joinToString(","),
+    )
+
+    return strippedSecurityVerify
+}
+
+private fun isOutgoingInviteAuthFailure(response: SipResponse): Boolean {
         if (response.statusCode != 500) {
             return false
         }
