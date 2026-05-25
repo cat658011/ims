@@ -2805,32 +2805,42 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
             val ipType = if(localAddr is Inet6Address) "IP6" else "IP4"
 
-            val sdp = """
-v=0
-o=- 1 2 IN $ipType ${socket.gLocalAddr().hostAddress}
-s=phh voice call
-c=IN $ipType ${socket.gLocalAddr().hostAddress}
-b=AS:$offerBandwidthAs
-b=RS:0
-b=RR:0
-t=0 0
-m=audio ${rtpSocket.localPort} RTP/AVP ${allTracks.joinToString(" ")}
-b=AS:$offerBandwidthAs
-b=RS:0
-b=RR:0
-a=ptime:20
-a=maxptime:240
-${if (offerAmrWb) "a=rtpmap:$amrWbTrack AMR-WB/16000\r\na=fmtp:$amrWbTrack octet-align=0;mode-change-capability=2;max-red=0\r\na=rtpmap:$dtmfWbTrack telephone-event/16000\r\na=fmtp:$dtmfWbTrack 0-15" else ""}
-a=rtpmap:$amrNbTrack AMR/8000/1
-a=fmtp:$amrNbTrack mode-change-capability=2;octet-align=0;max-red=0
-a=rtpmap:$dtmfNbTrack telephone-event/8000
-a=fmtp:$dtmfNbTrack 0-15
-a=curr:qos local none
-a=curr:qos remote none
-a=des:qos optional local sendrecv
-a=des:qos optional remote sendrecv
-a=sendrecv
-                       """.trim().toByteArray()
+            val sdpLines = mutableListOf(
+               "v=0",
+               "o=- 1 2 IN $ipType ${socket.gLocalAddr().hostAddress}",
+               "s=phh voice call",
+               "c=IN $ipType ${socket.gLocalAddr().hostAddress}",
+               "b=AS:$offerBandwidthAs",
+               "b=RS:0",
+               "b=RR:0",
+               "t=0 0",
+               "m=audio ${rtpSocket.localPort} RTP/AVP ${allTracks.joinToString(" ")}",
+               "b=AS:$offerBandwidthAs",
+               "b=RS:0",
+               "b=RR:0",
+               "a=ptime:20",
+               "a=maxptime:240",
+           )
+           if (offerAmrWb) {
+               sdpLines += listOf(
+                   "a=rtpmap:$amrWbTrack AMR-WB/16000",
+                   "a=fmtp:$amrWbTrack octet-align=0;mode-change-capability=2;max-red=0",
+                   "a=rtpmap:$dtmfWbTrack telephone-event/16000",
+                   "a=fmtp:$dtmfWbTrack 0-15",
+               )
+           }
+           sdpLines += listOf(
+               "a=rtpmap:$amrNbTrack AMR/8000/1",
+               "a=fmtp:$amrNbTrack mode-change-capability=2;octet-align=0;max-red=0",
+               "a=rtpmap:$dtmfNbTrack telephone-event/8000",
+               "a=fmtp:$dtmfNbTrack 0-15",
+               "a=curr:qos local none",
+               "a=curr:qos remote none",
+               "a=des:qos optional local sendrecv",
+               "a=des:qos optional remote sendrecv",
+               "a=sendrecv",
+           )
+           val sdp = sdpLines.joinToString("\r\n").toByteArray(Charsets.US_ASCII)
 
             val normalizedPhoneNumber = normalizeOutgoingDialTargetForTelUri(phoneNumber)
             val to = if (normalizedPhoneNumber.startsWith("+")) {
