@@ -1103,7 +1103,7 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
             else if (socket is SipConnectionUdp) serverSocketUdp.gReader()
             else socket.gReader()
 
-        val regReply = try {
+        var regReply = try {
             authenticatedRegisterReader.parseMessage()
         } catch (t: Throwable) {
             Rlog.w(
@@ -1124,6 +1124,30 @@ private fun scheduleReconnectRetry(reason: String, delayMs: Long) {
             return
         }
         Rlog.d(TAG, "Received $regReply")
+
+        if (regReply is SipResponse && regReply.statusCode == 423) {
+            val minExpiresStr = regReply.headers["min-expires"]?.getOrNull(0)
+            val minExpires = minExpiresStr?.toIntOrNull() ?: 7200
+            Rlog.w(TAG, "Registration rejected with 423 Interval Too Brief. Retrying with Expires: $minExpires")
+            
+            register(expires = minExpires)
+            
+            val retryReply = try {
+                authenticatedRegisterReader.parseMessage()
+            } catch (t: Throwable) {
+                Rlog.w(TAG, "423 Retry REGISTER response read failed, aborting SIP", t)
+                failConnectAndRetry("423 Retry REGISTER response read failed")
+                return
+            }
+
+            if (retryReply == null) {
+                Rlog.w(TAG, "423 Retry REGISTER got EOF/no response, aborting SIP")
+                failConnectAndRetry("423 Retry REGISTER got EOF/no response")
+                return
+            }
+            Rlog.d(TAG, "Received 423 retry response: $retryReply")
+            regReply = retryReply
+        }
 
         if (regReply !is SipResponse || regReply.statusCode != 200) {
             Rlog.w(TAG, "Could not connect, aborting SIP")
@@ -1454,7 +1478,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
         registerHeaders += update.headers
         commonHeaders += update.headers
     }
-    fun register(_writer: OutputStream? = null) {
+    fun register(_writer: OutputStream? = null, expires: Int = 7200) {
         RegistrationCellInfoLogger.log(TAG, subTelephonyManager)
 
         // XXX samsung rom apparently regenerates local SPIC/SPIS every register,
@@ -1475,6 +1499,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
             ipsecSettings = ipsecSettings,
             clientPort = socket.gLocalPort(),
             serverPort = serverSocket.localPort,
+            expires = expires,
         )
         Rlog.d(TAG, "Sending $msg")
         synchronized(writer) {

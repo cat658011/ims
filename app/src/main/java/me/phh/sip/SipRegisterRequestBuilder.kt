@@ -11,6 +11,7 @@ object SipRegisterRequestBuilder {
         ipsecSettings: SipIpsecSettings,
         clientPort: Int,
         serverPort: Int,
+        expires: Int = 7200,
     ): SipRequest {
         val secClientLine = SipSecurityClientHeader.build(
             ipsecSettings = ipsecSettings,
@@ -25,7 +26,7 @@ object SipRegisterRequestBuilder {
             // "sip:lte-lguplus.co.kr",
             registerHeaders +
                 """
-                Expires: 7200
+                Expires: $expires
                 Cseq: $registerCounter REGISTER
                 Contact: $contact
                 Supported: path, gruu, sec-agree
