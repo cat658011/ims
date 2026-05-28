@@ -58,7 +58,7 @@ class SipReader(private val input: InputStream) : BufferedInputStream(input) {
         //  ring buffer internally so this is safe.
 
         mark(markLength)
-        var line = ByteArray(0)
+        val line = java.io.ByteArrayOutputStream()
         while (true) {
             when (read()) {
                 -1 -> {
@@ -73,18 +73,18 @@ class SipReader(private val input: InputStream) : BufferedInputStream(input) {
                     if (lineEnd >= markpos && buf[lineEnd] == '\r'.code.toByte()) lineEnd--
                     if (lineEnd < markpos) return null
 
-                    line += buf.slice(markpos..lineEnd)
+                    line.write(buf, markpos, lineEnd - markpos + 1)
                     if (!continueToNextLine()) break
                     // check ate extra whitespaces, add a single space to our buffer
                     // and continue appending to it
-                    line += ' '.code.toByte()
+                    line.write(' '.code)
                 }
             }
         }
 
-        if (line.size == 0) return null
+        if (line.size() == 0) return null
 
-        return String(line, Charsets.US_ASCII)
+        return line.toString("US-ASCII")
     }
 
     fun readNBytes2(len: Int): ByteArray {
