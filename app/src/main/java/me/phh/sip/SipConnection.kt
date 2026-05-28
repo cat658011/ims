@@ -351,8 +351,7 @@ class SipConnectionUdp(
             var currentSize = 0
 
             fun recvPacket() {
-                // select()
-                select(listOf(getChannel()))
+                // blocking receive without redundant select polling
                 socket.receive(currentDgram)
                 currentPosition = 0
                 currentSize = currentDgram.length
@@ -459,8 +458,7 @@ class SipConnectionUdpServer(
             var currentSize = 0
 
             fun recvPacket() {
-                // select()
-                select(listOf(getChannel()))
+                // blocking receive without redundant select polling
                 socket.receive(currentDgram)
                 currentPosition = 0
                 currentSize = currentDgram.length
