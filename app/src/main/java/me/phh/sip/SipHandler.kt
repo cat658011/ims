@@ -3886,8 +3886,13 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
         prAckWaitTracker.clearAndNotifyAll()
 
         val f = request.headers["from"]
-        val m = extractCallerNumberFromHeader(f!![0]!!)
-        Rlog.d(TAG, "Incoming call from $m rawFrom=${f[0]} callId=$incomingCallId hasIncomingResponseWriter=${requestWriters.containsKey(incomingCallId)}")
+        val fromHeader = f?.getOrNull(0)
+        if (fromHeader == null) {
+            Rlog.w(TAG, "Incoming call missing From header, returning 400")
+            return 400
+        }
+        val m = extractCallerNumberFromHeader(fromHeader)
+        Rlog.d(TAG, "Incoming call from $m rawFrom=$fromHeader callId=$incomingCallId hasIncomingResponseWriter=${requestWriters.containsKey(incomingCallId)}")
 
         // We'll have three states:
         // - 100 Trying (this will be done by returning 100 in this function)
@@ -4107,8 +4112,13 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
             // Important for tel: URIs: without <> the appended ;tag can be parsed as a TEL URI
             // parameter instead of a SIP To header parameter, and the network may ignore our 200 OK.
             val localToTag = randomBytes(6).toHex()
-            val toWithTag = request.headers["to"]!!.map { h -> SipHeaderTagger.addTag(h, localToTag) }
-            Rlog.d(TAG, "Incoming To header normalized/tagged: ${request.headers["to"]!!} -> $toWithTag")
+            val toHeader = request.headers["to"]
+            if (toHeader == null) {
+                Rlog.w(TAG, "Incoming call missing To header, returning 400")
+                return@thread
+            }
+            val toWithTag = toHeader.map { h -> SipHeaderTagger.addTag(h, localToTag) }
+            Rlog.d(TAG, "Incoming To header normalized/tagged: $toHeader -> $toWithTag")
 
             val myHeaders = commonHeaders + //Require: precondition
                 """
@@ -4140,7 +4150,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
                 rtpSocket =  rtpSocket,
                 sdp = mySdp,
                 hasEarlyMedia = sendReliable183,
-                remoteContact = extractDestinationFromContact(request.headers["contact"]!![0]),
+                remoteContact = extractDestinationFromContact(request.headers["contact"]?.getOrNull(0) ?: ""),
                 incomingResponseWriter = incomingResponseWriter,
             )
             val installedIncomingCallId = currentCall?.callIdOrEmpty().orEmpty()
