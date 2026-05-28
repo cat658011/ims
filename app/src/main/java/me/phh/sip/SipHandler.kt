@@ -34,6 +34,11 @@ class SipHandler(
         private const val UPLINK_GAIN_UNSET_Q8 = 0
         private const val UPLINK_GAIN_UNITY_Q8 = 256
         private const val INCOMING_ACCEPT_IMS_ACCESS_CHANGE_GUARD_MS = 1_200L
+
+        // Pre-compiled regex patterns for SDP parsing hot paths.
+        private val CRLF_SPLIT = "[\\r\\n]+".toRegex()
+        private val WHITESPACE_SPLIT = "\\s+".toRegex()
+        private val COLON_SPACE_SPLIT = "[: ]+".toRegex()
     }
 
     val myHandler = Handler(HandlerThread("PhhMmTelFeature").apply { start() }.looper)
@@ -1630,7 +1635,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
         val sdp = request.body
             .toString(Charsets.UTF_8)
-            .split("[\\r\\n]+".toRegex())
+            .split(CRLF_SPLIT)
             .filter { it.isNotBlank() }
 
         Rlog.d(TAG, "Handling UPDATE SDP offer: callId=$requestCallId cseq=$requestCseq sdp=$sdp")
@@ -1649,7 +1654,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
         val rtpRemote = sdpConnectionData.split(" ").getOrNull(2)
         val rtpRemoteAddr = rtpRemote?.let { InetAddress.getByName(it) }
-        val mediaParts = sdpMedia.trim().split("\\s+".toRegex())
+        val mediaParts = sdpMedia.trim().split(WHITESPACE_SPLIT)
         val rtpRemotePort = mediaParts.getOrNull(1)?.toIntOrNull()
         val offeredPayloads = mediaParts.drop(3).mapNotNull { it.toIntOrNull() }.toSet()
 
@@ -1680,7 +1685,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
         ): Pair<Int, String>? {
             val maps = attributes.filter { it.startsWith("rtpmap:") && it.contains(codec) }
             val matches = maps.mapNotNull { m ->
-                val track = m.split("[: ]+".toRegex()).getOrNull(1)?.toIntOrNull()
+                val track = m.split(COLON_SPACE_SPLIT).getOrNull(1)?.toIntOrNull()
                 if (track != null && offeredPayloads.contains(track)) Pair(track, m) else null
             }
             val sorted = matches.sortedBy { m ->
@@ -2322,7 +2327,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
     private fun completeIncomingPreconditionAnswerSdp(answerSdp: ByteArray, callId: String): ByteArray {
         val lines = answerSdp
             .toString(Charsets.UTF_8)
-            .split("[\r\n]+".toRegex())
+            .split(CRLF_SPLIT)
             .filter { it.isNotBlank() }
 
         val hasPrecondition = lines.any { line ->
@@ -3153,7 +3158,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
                 if (!isSdp) return@setResponseCallback false
 
-                val respSdp = resp.body.toString(Charsets.UTF_8).split("[\r\n]+".toRegex()).toList()
+                val respSdp = resp.body.toString(Charsets.UTF_8).split(CRLF_SPLIT).toList()
                 SipAudioCodecSdpLogger.logRemoteAudioCodecCandidates(
                     tag = TAG,
                     context = "outgoing SDP response ${resp.statusCode} callId=${resp.callIdOrEmpty()}",
@@ -3174,14 +3179,14 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
                 fun lookResponseTrackMatching(codec: String, notAdditional: String = ""): Pair<Int, String>? {
                     val offeredPayloads = sdpElement("m")
                         ?.trim()
-                        ?.split("\\s+".toRegex())
+                        ?.split(WHITESPACE_SPLIT)
                         ?.drop(3)
                         ?.mapNotNull { it.toIntOrNull() }
                         ?.toSet()
                         .orEmpty()
                     val maps = respAttributes.filter { it.startsWith("rtpmap:") && it.contains(codec) }
                     val matches = maps.mapNotNull { m ->
-                        val track = m.split("[: ]+".toRegex()).getOrNull(1)?.toIntOrNull()
+                        val track = m.split(COLON_SPACE_SPLIT).getOrNull(1)?.toIntOrNull()
                         if (track != null && offeredPayloads.contains(track)) Pair(track, m) else null
                     }
                     val sorted = matches.sortedBy { m ->
@@ -3339,7 +3344,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
                         val remoteMaxptimeLine = respSdp.firstOrNull { it.startsWith("a=maxptime:") } ?: "a=maxptime:40"
 
                         val localUpdateSdpLines = sdp.toString(Charsets.UTF_8)
-                            .split("[\r\n]+".toRegex())
+                            .split(CRLF_SPLIT)
                             .filter { it.isNotBlank() }
                             .map { line ->
                                 when {
@@ -3672,7 +3677,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
     private fun handleInDialogInvite(request: SipRequest, call: Call, responseWriter: OutputStream): Int {
         val callId = request.callIdOrEmpty()
         val cseq = request.headers["cseq"]?.getOrNull(0).orEmpty()
-        val sdp = request.body.toString(Charsets.UTF_8).split("[\r\n]+".toRegex()).toList()
+        val sdp = request.body.toString(Charsets.UTF_8).split(CRLF_SPLIT).toList()
         Rlog.d(TAG, "Handling in-dialog INVITE: callId=$callId cseq=$cseq sdp=$sdp")
 
         fun sdpElement(command: String): String? {
@@ -3695,7 +3700,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
         fun lookTrackMatching(codec: String, notAdditional: String = ""): Pair<Int, String>? {
             val maps = attributes.filter { it.startsWith("rtpmap") && it.contains(codec) }
             val matches = maps.map { m ->
-                val track = m.split("[: ]+".toRegex())[1].toInt()
+                val track = m.split(COLON_SPACE_SPLIT)[1].toInt()
                 Pair(track, m)
             }
             val sorted = if (matches.size > 1) {
@@ -3894,7 +3899,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
         // - 180 Ringing Notification's AudioTrack is playing, the user can hear its phone -- Note: Ringing doesn't give SDP
         // - 200 User has accepted the call
 
-        val sdp = request.body.toString(Charsets.UTF_8).split("[\r\n]+".toRegex()).toList()
+        val sdp = request.body.toString(Charsets.UTF_8).split(CRLF_SPLIT).toList()
         Rlog.d(TAG, "Split SDP into $sdp")
         fun sdpElement(command: String): String? {
             val v = sdp.firstOrNull { it.startsWith("$command=")} ?: return null
@@ -3928,7 +3933,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
             //TODO: also match on fmtp
             val maps = attributes.filter { it.startsWith("rtpmap") && it.contains(codec) }
             val matches = maps.map { m ->
-                val track = m.split("[: ]+".toRegex())[1].toInt()
+                val track = m.split(COLON_SPACE_SPLIT)[1].toInt()
                 val desc = m
                 Pair(track, desc)
             }
