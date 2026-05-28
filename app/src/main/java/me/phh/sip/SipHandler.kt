@@ -3090,6 +3090,29 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
                             return@setResponseCallback true
                         }
 
+                        if (resp.statusCode == 422 && failedCseq.contains("INVITE")) {
+                            val minSeStr = resp.headers["min-se"]?.getOrNull(0)
+                            val minSe = minSeStr?.toIntOrNull() ?: 1800
+                            Rlog.w(TAG, "Outgoing INVITE rejected with 422 Session Interval Too Small. Retrying with Session-Expires: $minSe callId=$failedCallId")
+
+                            val newCseq = outgoingDialogNextCseq.getAndIncrement()
+                            val newHeaders = msg.headers.toMutableMap()
+                            newHeaders["cseq"] = listOf("$newCseq INVITE")
+                            newHeaders["session-expires"] = listOf(minSe.toString())
+
+                            val retryMsg = SipRequest(SipMethod.INVITE, to, newHeaders, sdp)
+                            Rlog.d(TAG, "Sending 422 retry: $retryMsg")
+                            try {
+                                synchronized(socket.gWriter()) {
+                                    socket.gWriter().write(retryMsg.toByteArray())
+                                    socket.gWriter().flush()
+                                }
+                            } catch (e: Exception) {
+                                Rlog.w(TAG, "Failed to send 422 retry", e)
+                            }
+                            return@setResponseCallback true
+                        }
+
                         Rlog.w(TAG, "Outgoing dialog request failed: status=${resp.statusCode} ${resp.statusString} cseq=$failedCseq callId=$failedCallId")
                         stopCallRuntime("outgoing dialog failure")
 
