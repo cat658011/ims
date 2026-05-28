@@ -346,7 +346,7 @@ class SipConnectionUdp(
             }
         }
         reader = object: InputStream() {
-            val currentDgram = DatagramPacket(ByteArray(128*1024), 128*1024)
+            val currentDgram = DatagramPacket(ByteArray(16 * 1024), 16 * 1024)
             var currentPosition = 0
             var currentSize = 0
 
@@ -356,6 +356,9 @@ class SipConnectionUdp(
                 socket.receive(currentDgram)
                 currentPosition = 0
                 currentSize = currentDgram.length
+                if (currentSize > 8192) {
+                    Rlog.w(SIP_IPSEC_CLEANUP_TAG, "Unusually large UDP datagram received: ${currentSize}B; possible fragmentation issue")
+                }
             }
 
             override fun read(): Int {
@@ -451,7 +454,7 @@ class SipConnectionUdpServer(
 
     fun gReader(): SipReader {
         return object: InputStream() {
-            val currentDgram = DatagramPacket(ByteArray(128*1024), 128*1024)
+            val currentDgram = DatagramPacket(ByteArray(16 * 1024), 16 * 1024)
             var currentPosition = 0
             var currentSize = 0
 
@@ -461,6 +464,9 @@ class SipConnectionUdpServer(
                 socket.receive(currentDgram)
                 currentPosition = 0
                 currentSize = currentDgram.length
+                if (currentSize > 8192) {
+                    Rlog.w(SIP_IPSEC_CLEANUP_TAG, "Unusually large UDP server datagram received: ${currentSize}B; possible fragmentation issue")
+                }
             }
 
             override fun read(): Int {
