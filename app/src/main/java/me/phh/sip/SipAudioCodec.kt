@@ -57,9 +57,14 @@ internal data class RemoteAudioCodecCandidate(
 )
 
 internal object SipAudioCodecSdpLogger {
+    private val WHITESPACE_REGEX = "\\s+".toRegex()
+    private val RTPMAP_REGEX = "^rtpmap:(\\d+)\\s+([^/\\s]+)/(\\d+)(?:/([^\\s]+))?.*".toRegex(
+        RegexOption.IGNORE_CASE,
+    )
+
     fun parseRemoteAudioCodecCandidates(sdp: List<String>): List<RemoteAudioCodecCandidate> {
         val mediaPayloads = sdp.firstOrNull { it.startsWith("m=audio ") }
-            ?.split("\\s+".toRegex())
+            ?.split(WHITESPACE_REGEX)
             ?.drop(3)
             ?.mapNotNull { it.toIntOrNull() }
             .orEmpty()
@@ -85,14 +90,10 @@ internal object SipAudioCodecSdpLogger {
             }
             .toMap()
 
-        val rtpmapRegex = "^rtpmap:(\\d+)\\s+([^/\\s]+)/(\\d+)(?:/([^\\s]+))?.*".toRegex(
-            RegexOption.IGNORE_CASE,
-        )
-
         return attributes
             .filter { it.startsWith("rtpmap:", ignoreCase = true) }
             .mapNotNull { rtpmap ->
-                val match = rtpmapRegex.matchEntire(rtpmap) ?: return@mapNotNull null
+                val match = RTPMAP_REGEX.matchEntire(rtpmap) ?: return@mapNotNull null
                 val payload = match.groupValues[1].toIntOrNull() ?: return@mapNotNull null
                 val codec = match.groupValues[2].uppercase()
                 val rate = match.groupValues[3].toIntOrNull()
