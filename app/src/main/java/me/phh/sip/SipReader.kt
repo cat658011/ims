@@ -21,8 +21,9 @@ class SipReader(private val input: InputStream) : BufferedInputStream(input) {
     }
 
     //  internal buffer size is not exposed but default is 2k so
-    //  just pick something smaller
-    var markLength = 1024
+    //  pick something that covers the longest real-world IMS header
+    //  lines (e.g. Security-Server chains from carrier proxies).
+    var markLength = 4096
 
     fun continueToNextLine(): Boolean {
         // peak at next line to decide if we got a continuation or not
