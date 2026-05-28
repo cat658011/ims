@@ -2749,7 +2749,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
     Call is now running.
 
-    Session timers (RFC 4028): we advertise Session-Expires: 900 / Supported: timer.
+    Session timers (RFC 4028): we advertise Session-Expires: 1800 / Supported: timer.
     The network nominates a refresher; if it nominates us (UAC), we must send a re-INVITE
     before the session expires. If it nominates itself (UAS), it sends re-INVITEs to us and
     we respond 200 OK (handled in parseMessage as an incoming INVITE).
@@ -2879,7 +2879,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
                     Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, MESSAGE, PRACK, OPTIONS
                     P-Early-Media: supported
                     Content-Type: application/sdp
-                    Session-Expires: 900
+                    Session-Expires: 1800
                     Supported: 100rel, replaces, timer, precondition
                     Accept: application/sdp
                     Min-SE: 90
