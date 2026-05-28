@@ -2238,11 +2238,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
         val key = "${callId.ifBlank { "<blank>" }}|$reason"
         if (!outgoingConnectedDuplicateLogKeys.add(key)) return
 
-        if (callId.isBlank()) {
-            logDuplicateOutgoingConnectedOnce("", reason)
-        } else {
-            logDuplicateOutgoingConnectedOnce(callId, reason)
-        }
+        Rlog.d(TAG, "Suppressing duplicate outgoing call connected notify: callId=${callId.ifBlank { "<blank>" }} reason=$reason")
     }
 
     private fun maybeNotifyOutgoingCallConnected(call: Call, reason: String) {
