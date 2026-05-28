@@ -3915,13 +3915,33 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
 
         Rlog.d(TAG, "Got sdpTiming $sdpTiming")
 
-        if (sdpTiming != "0 0")
+        if (sdpTiming != null && sdpTiming != "0 0")
             Rlog.d(TAG, "Uh-oh, unknown timing mode")
 
 
-        val rtpRemote = sdpConnectionData!!.split(" ")[2] //c=IN IP6 xxx
-        val rtpRemoteAddr = InetAddress.getByName(rtpRemote)
-        val rtpRemotePort = sdpMedia!!.split(" ")[1] //m=audio 30798 RTP/AVP 96 97 98 8 18 101 100 99
+        if (sdpConnectionData == null || sdpMedia == null) {
+            Rlog.w(TAG, "Rejecting incoming INVITE: missing c= or m= line in SDP")
+            return 488
+        }
+
+        val rtpRemote = sdpConnectionData.split(" ").getOrNull(2) //c=IN IP6 xxx
+        val rtpRemotePortStr = sdpMedia.split(" ").getOrNull(1) //m=audio 30798 RTP/AVP 96 97 98 8 18 101 100 99
+
+        if (rtpRemote == null || rtpRemotePortStr == null) {
+            Rlog.w(TAG, "Rejecting incoming INVITE: malformed c= or m= line in SDP")
+            return 488
+        }
+
+        val rtpRemoteAddr = try {
+            InetAddress.getByName(rtpRemote)
+        } catch (e: Exception) {
+            Rlog.w(TAG, "Rejecting incoming INVITE: failed to resolve RTP remote address '$rtpRemote'", e)
+            return 488
+        }
+        val rtpRemotePort = rtpRemotePortStr.toIntOrNull() ?: run {
+            Rlog.w(TAG, "Rejecting incoming INVITE: invalid RTP port '$rtpRemotePortStr'")
+            return 488
+        }
 
         val attributes = sdp.filter { it.startsWith("a=") }.map { it.substring(2)}
         SipAudioCodecSdpLogger.logRemoteAudioCodecCandidates(
