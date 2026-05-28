@@ -1768,7 +1768,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
             "a=conf:qos remote sendrecv",
             "a=sendrecv",
         )
-        val answerSdp = answerSdpLines.joinToString("\r\n").toByteArray(Charsets.US_ASCII)
+        val answerSdp = (answerSdpLines.joinToString("\r\n") + "\r\n").toByteArray(Charsets.US_ASCII)
 
         currentCall = call.copy(
             amrTrack = amrTrack,
@@ -3361,7 +3361,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
                                 }
                             }
 
-                        val newSdp = localUpdateSdpLines.joinToString("\r\n").toByteArray(Charsets.US_ASCII)
+                        val newSdp = (localUpdateSdpLines.joinToString("\r\n") + "\r\n").toByteArray(Charsets.US_ASCII)
 
                         val updateHeaders = localDialogHeadersForRequest(currentCall!!, SipMethod.UPDATE) -
                             "content-length" +
@@ -3779,7 +3779,7 @@ if (pcscfs.isNotEmpty() && abandonnedBecauseOfNoPcscf) {
             "a=fmtp:$dtmfTrack 0-15",
         )
         answerDirection?.let { answerSdpLines += "a=$it" }
-        val answerSdp = answerSdpLines.joinToString("\r\n").toByteArray(Charsets.US_ASCII)
+        val answerSdp = (answerSdpLines.joinToString("\r\n") + "\r\n").toByteArray(Charsets.US_ASCII)
 
         currentCall = call.copy(
             amrTrack = amrTrack,
