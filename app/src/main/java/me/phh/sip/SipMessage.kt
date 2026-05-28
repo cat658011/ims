@@ -27,6 +27,39 @@ typealias SipHeadersMap = Map<String, List<SipHeader>>
 
 @OptIn(ExperimentalStdlibApi::class)
 abstract class SipMessage() {
+    companion object {
+        private val headerCache = java.util.concurrent.ConcurrentHashMap<String, String>().apply {
+            put("via", "Via")
+            put("p-preferred-identity", "P-Preferred-Identity")
+            put("from", "From")
+            put("to", "To")
+            put("event", "Event")
+            put("expires", "Expires")
+            put("contact", "Contact")
+            put("max-forwards", "Max-Forwards")
+            put("user-agent", "User-Agent")
+            put("route", "Route")
+            put("call-id", "Call-ID")
+            put("require", "Require")
+            put("proxy-require", "Proxy-Require")
+            put("cseq", "CSeq")
+            put("p-access-network-info", "P-Access-Network-Info")
+            put("content-length", "Content-Length")
+            put("security-verify", "Security-Verify")
+            put("security-client", "Security-Client")
+            put("security-server", "Security-Server")
+            put("allow", "Allow")
+            put("supported", "Supported")
+            put("content-type", "Content-Type")
+        }
+
+        fun getFormattedHeader(header: String): String {
+            return headerCache.getOrPut(header) {
+                header.split("-").map { it.replaceFirstChar(Char::titlecase) }.joinToString("-")
+            }
+        }
+    }
+
     abstract val firstLine: String
     abstract val headers: SipHeadersMap
     abstract val body: ByteArray
@@ -73,7 +106,7 @@ abstract class SipMessage() {
                 { lines, (header, values) ->
                     lines +
                         values.map {
-                            val newHeader = header.split("-").map { it.replaceFirstChar(Char::titlecase) }.joinToString("-")
+                            val newHeader = getFormattedHeader(header)
                             "$newHeader: ${it.toString()}"
                         }
                 }
